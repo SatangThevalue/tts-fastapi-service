@@ -18,8 +18,8 @@ from pydub import AudioSegment
 from pydub.silence import split_on_silence, detect_silence
 from pedalboard import Pedalboard, Compressor, HighpassFilter, LowShelfFilter, HighShelfFilter, NoiseGate, Limiter, Reverb, Chorus, Distortion, PitchShift, Delay, Convolution
 
-# Video Editing (MoviePy)
-from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip, CompositeAudioClip
+# Video Editing (MoviePy v2)
+from moviepy import VideoFileClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip, CompositeAudioClip
 
 # CPU-based TTS
 import edge_tts
@@ -346,27 +346,25 @@ def _process_video_edit_sync(
         target_aspect = target_w / target_h
         if video_aspect > target_aspect:
             new_w = int(video.h * target_aspect)
-            x_center = video.w / 2
-            video = video.crop(x_center=x_center, width=new_w, height=video.h)
+            video = video.cropped(x_center=video.w / 2, width=new_w, height=video.h)
         else:
             new_h = int(video.w / target_aspect)
-            y_center = video.h / 2
-            video = video.crop(y_center=y_center, width=video.w, height=new_h)
-        video = video.resize(newsize=(target_w, target_h))
+            video = video.cropped(y_center=video.h / 2, width=video.w, height=new_h)
+        video = video.resized((target_w, target_h))
 
     final_audio = None
     if audio_path and os.path.exists(audio_path):
         new_audio = AudioFileClip(audio_path)
-        new_audio = new_audio.set_duration(min(new_audio.duration, video.duration))
+        new_audio = new_audio.with_duration(min(new_audio.duration, video.duration))
         if mute_original_audio or video.audio is None:
             final_audio = new_audio
         else:
-            final_audio = CompositeAudioClip([video.audio.volumex(0.3), new_audio])
-            
-    if final_audio: video = video.set_audio(final_audio)
+            final_audio = CompositeAudioClip([video.audio.with_volume_scaled(0.3), new_audio])
+                
+    if final_audio: video = video.with_audio(final_audio)
 
     clips_to_composite = [video]
-    
+        
     font_arg = DEFAULT_THAI_FONT_PATH if os.path.exists(DEFAULT_THAI_FONT_PATH) else 'Arial'
         
     # Override ImageMagick binary path for Linux if needed (Fix for 'unset' error)
@@ -384,19 +382,19 @@ def _process_video_edit_sync(
             current_y = start_y
             for line in lines:
                 txt_clip = TextClip(
-                    line, fontsize=45, color='black', bg_color='white', 
-                    font=font_arg,  
-                    method='caption', align='center', size=(box_width, None)
+                    font=font_arg, text=line, font_size=45, color='black', bg_color='white', 
+                    method='caption', text_align='center', size=(box_width, None)
                 )
-                txt_clip = txt_clip.set_position(('center', current_y)).set_duration(video.duration)
+                txt_clip = txt_clip.with_position(('center', current_y)).with_duration(video.duration)
                 clips_to_composite.append(txt_clip)
                 current_y += txt_clip.h + spacing
         except Exception as e: print(f"Warning: Text overlay failed: {e}")
 
     if add_watermark and add_watermark.strip():
         try:
-            wm_clip = TextClip(add_watermark, fontsize=40, color='white', bg_color='transparent', font=font_arg)
-            wm_clip = wm_clip.set_position(('right','bottom')).set_duration(video.duration).margin(bottom=50, right=50, opacity=0)
+            wm_clip = TextClip(font=font_arg, text=add_watermark, font_size=40, color='white')
+            # Optional bg_color removal: bg_color='transparent' in v1 might be implied in v2.
+            wm_clip = wm_clip.with_position(('right','bottom')).with_duration(video.duration).margin(bottom=50, right=50, opacity=0)
             clips_to_composite.append(wm_clip)
         except: pass
 

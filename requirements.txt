@@ -16,9 +16,9 @@ soundfile>=0.12.1
 httpx>=0.25.0
 numpy>=1.24.0
 
-# Video Editing (Pinned to 1.x branch for stable editor.py module support)
-moviepy>=1.0.3,<2.0.0
-Pillow<10.0.0
+# Video Editing (Upgraded to v2.x)
+moviepy>=2.0.0
+Pillow>=10.0.0
 
 # CPU-based TTS & Text Processing
 edge-tts>=6.1.9
