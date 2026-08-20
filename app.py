@@ -411,7 +411,9 @@ async def process_video_edit_async(*args, **kwargs):
 # ==========================================
 app = FastAPI(title="AI Media Studio API (Audio & Video)")
 mcp = FastMCP("Media_Studio_MCP")
-app.mount("/sse", mcp.get_starlette_app())
+mcp_app = mcp.get_starlette_app() if hasattr(mcp, 'get_starlette_app') else None
+if mcp_app:
+    app.mount("/sse", mcp_app)
 
 @app.get("/api/health")
 async def health_check():
