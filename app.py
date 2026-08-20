@@ -6,11 +6,14 @@ import asyncio
 import tempfile
 import json
 import re
+import random
 from datetime import datetime
 import httpx
 
 import soundfile as sf
 import numpy as np
+from pydub import AudioSegment
+from pydub.silence import split_on_silence, detect_silence
 from pedalboard import Pedalboard, Compressor, HighpassFilter, LowShelfFilter, HighShelfFilter, NoiseGate, Limiter, Reverb, Chorus, Distortion, PitchShift, Delay
 
 # Video Editing (MoviePy)
@@ -37,7 +40,9 @@ OUTPUT_DIR = os.path.join(TEMP_DIR, "media_outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 SPEAKERS_DIR = os.path.join(os.path.dirname(__file__), "pretrained_models", "speakers")
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets", "foley")
 os.makedirs(SPEAKERS_DIR, exist_ok=True)
+os.makedirs(ASSETS_DIR, exist_ok=True)
 
 API_KEY_SECRET=os.environ.get("TTS_API_KEY", "") 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -86,34 +91,109 @@ STUDIO_PRESETS = {
 }
 
 # ==========================================
+# 1. NEW: Foley & Breath Insertion (Pydub + Numpy)
+# ==========================================
+def generate_synthetic_breath(duration_ms=400):
+    """
+    If no breath audio file exists in assets, generate a very subtle white-noise 
+    with a fade-in/fade-out to simulate a quick human inhale.
+    """
+    # 44100 Hz, 16-bit
+    samples = int((duration_ms / 1000.0) * 44100)
+    # Generate pink/white noise
+    noise = np.random.normal(0, 0.05, samples)
+    # Apply envelope (fade in and out to sound like a breath)
+    x = np.linspace(0, np.pi, samples)
+    envelope = np.sin(x) ** 2
+    breath_wave = noise * envelope
+    # Convert to 16-bit integer format for pydub
+    breath_wave = np.int16(breath_wave * 32767)
+    breath_audio = AudioSegment(
+        breath_wave.tobytes(), 
+        frame_rate=44100,
+        sample_width=2, 
+        channels=1
+    )
+    # Reduce volume significantly so it's subconscious
+    return breath_audio - 15 
+
+def insert_breaths(input_wav_path, output_wav_path):
+    """
+    Analyzes the audio for silence (gaps between sentences) and inserts 
+    a subtle breathing sound (Foley) to make the AI sound 100% human.
+    """
+    print("Detecting silence and inserting breaths...")
+    audio = AudioSegment.from_file(input_wav_path)
+    
+    # Detect silences longer than 400ms (typical pause between sentences)
+    # Returns a list of [start_ms, end_ms]
+    silence_ranges = detect_silence(audio, min_silence_len=400, silence_thresh=-40)
+    
+    if not silence_ranges:
+        # No significant pauses found, just return original
+        audio.export(output_wav_path, format="wav")
+        return
+        
+    # Check if we have real breath files, else use synthetic
+    breath_files = glob.glob(os.path.join(ASSETS_DIR, "breath*.wav"))
+    
+    # We will rebuild the audio track piece by piece
+    output_audio = AudioSegment.empty()
+    last_end = 0
+    
+    for start, end in silence_ranges:
+        # Add the speech segment before the silence
+        output_audio += audio[last_end:start]
+        
+        # Determine the pause length
+        pause_duration = end - start
+        
+        # Only insert breath if the pause is long enough to warrant a breath (e.g. > 500ms)
+        if pause_duration >= 500:
+            if breath_files:
+                # Load a random real breath file
+                b_file = random.choice(breath_files)
+                breath_snd = AudioSegment.from_file(b_file)
+                # Ensure breath isn't longer than the pause
+                if len(breath_snd) > pause_duration:
+                    breath_snd = breath_snd[:pause_duration].fade_out(50)
+                # Pad the rest of the silence
+                remaining_silence = pause_duration - len(breath_snd)
+                output_audio += breath_snd + AudioSegment.silent(duration=remaining_silence)
+            else:
+                # Use synthetic breath
+                breath_snd = generate_synthetic_breath(min(400, pause_duration))
+                remaining_silence = pause_duration - len(breath_snd)
+                output_audio += breath_snd + AudioSegment.silent(duration=max(0, remaining_silence))
+        else:
+            # Just keep original silence
+            output_audio += audio[start:end]
+            
+        last_end = end
+        
+    # Add the remaining tail of the audio
+    output_audio += audio[last_end:]
+    output_audio.export(output_wav_path, format="wav")
+
+
+# ==========================================
 # 2. AI Audio & Video Operations
 # ==========================================
 
 async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: str, ref_path: str, speed: float, speaker_model: str):
     """Generates audio for a chunk. Handles both GPU models (mocked) and CPU-fast models."""
     sample_rate = 44100
-    
     if engine == "EdgeTTS (Fast CPU)":
-        # 🌟 NEW CPU-BASED TTS (No GPU required, lightning fast)
         voice = "th-TH-PremwadeeNeural" if "th" in lang.lower() else "en-US-AriaNeural"
-        
-        # Edge-tts uses string formats like "+0%" or "+10%" for speed
         speed_percent = int((speed - 1.0) * 100)
         speed_str = f"+{speed_percent}%" if speed_percent >= 0 else f"{speed_percent}%"
-        
         communicate = edge_tts.Communicate(text_chunk, voice, rate=speed_str)
-        
         temp_mp3 = os.path.join(TEMP_DIR, f"edge_{uuid.uuid4().hex}.mp3")
         await communicate.save(temp_mp3)
-        
         audio_data, sr = sf.read(temp_mp3)
         os.remove(temp_mp3)
-        
-        if len(audio_data.shape) == 1:
-            audio_data = audio_data.reshape(-1, 1)
-            
+        if len(audio_data.shape) == 1: audio_data = audio_data.reshape(-1, 1)
         return audio_data, sr
-        
     else:
         # OmniVoice / CosyVoice (GPU Mock)
         await asyncio.sleep(1) 
@@ -122,20 +202,25 @@ async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: s
         return audio_data, sample_rate
 
 
-async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str, ref_path: str, out_path: str, speed: float = 1.0, speaker_model: str = "Default Model"):
+async def generate_tts_safely(
+    engine: str, mode: str, full_text: str, lang: str, ref_path: str, 
+    out_path: str, speed: float = 1.0, speaker_model: str = "Default Model",
+    apply_foley_breaths: bool = False
+):
     chunks = re.split(r'(?<=[.!?\n])\s+', full_text.strip())
     chunks = [c for c in chunks if c.strip()]
     if not chunks: chunks = [full_text]
     all_audio_arrays = []
     sample_rate = 44100
     
+    # 1. Generate Raw Chunks
     if engine == "EdgeTTS (Fast CPU)":
         for chunk in chunks:
             if not chunk.strip(): continue
             audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, speaker_model)
             sample_rate = sr
             all_audio_arrays.append(audio_data)
-            pause = np.zeros((int(sample_rate * 0.2), audio_data.shape[1] if len(audio_data.shape) > 1 else 1))
+            pause = np.zeros((int(sample_rate * 0.6), audio_data.shape[1] if len(audio_data.shape) > 1 else 1)) # Added 600ms pause
             all_audio_arrays.append(pause)
     else:
         async with gpu_lock:
@@ -144,33 +229,66 @@ async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str,
                 audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, speaker_model)
                 sample_rate = sr
                 all_audio_arrays.append(audio_data)
-                pause = np.zeros((int(sample_rate * 0.2), audio_data.shape[1] if len(audio_data.shape) > 1 else 1))
+                pause = np.zeros((int(sample_rate * 0.6), audio_data.shape[1] if len(audio_data.shape) > 1 else 1)) # Added 600ms pause
                 all_audio_arrays.append(pause)
                 
+    # 2. Save Initial Concatenated File
+    temp_concat_path = os.path.join(TEMP_DIR, f"pre_foley_{uuid.uuid4().hex}.wav")
     if all_audio_arrays:
         final_audio = np.concatenate(all_audio_arrays, axis=0)
-        sf.write(out_path, final_audio, sample_rate)
+        sf.write(temp_concat_path, final_audio, sample_rate)
     else:
-        sf.write(out_path, np.zeros((sample_rate, 1)), sample_rate)
+        sf.write(temp_concat_path, np.zeros((sample_rate, 1)), sample_rate)
+
+    # 3. Foley & Breath Insertion (If requested)
+    if apply_foley_breaths:
+        insert_breaths(temp_concat_path, out_path)
+        os.remove(temp_concat_path)
+    else:
+        os.rename(temp_concat_path, out_path)
+
 
 def apply_studio_mastering(input_path: str, output_path: str, gate: bool=True, bass: float=4.5, treble: float=3.0, comp: float=3.0, reverb_amount: float=0.0, drive_amount: float=0.0, pitch_shift: int=0, delay_time: float=0.0, humanize: bool=False):
+    """
+    Advanced Mastering using Pedalboard (Spotify's engine)
+    Includes Dynamic EQ (De-essing via Highpass/HighShelf adjustments), 
+    Harmonic Saturation (Distortion), and Convolution Reverb approximation.
+    """
     audio_data, sample_rate = sf.read(input_path)
     if len(audio_data.shape) > 1: audio_data = audio_data.T 
+    
     board = Pedalboard([
         PitchShift(semitones=pitch_shift) if pitch_shift != 0 else None,
         NoiseGate(threshold_db=-40.0, ratio=1.5, release_ms=250) if gate else None,
+        
+        # De-Esser / Highpass: Remove low rumble
         HighpassFilter(cutoff_frequency_hz=300 if bass <= -10 else 80),
+        
+        # Proximity Effect (Bass)
         LowShelfFilter(cutoff_frequency_hz=120, gain_db=bass), 
+        
+        # Harmonic Exciter / Saturation (Adds warmth, like an analog tube)
+        Distortion(drive_db=drive_amount if drive_amount > 0 else 1.0) if humanize else (Distortion(drive_db=drive_amount) if drive_amount > 0 else None),
+        
+        # Clarity (Treble)
         HighShelfFilter(cutoff_frequency_hz=6000, gain_db=treble), 
-        Distortion(drive_db=drive_amount) if drive_amount > 0 else None,
+        
+        # Studio Compressor
         Compressor(threshold_db=-15, ratio=comp, attack_ms=2.0, release_ms=100),
+        
+        # Delay (Echo)
         Delay(delay_seconds=delay_time, feedback=0.3, mix=0.4) if delay_time > 0 else None,
+        
+        # Convolution Reverb simulation (Room physics)
         Reverb(room_size=0.3 if delay_time > 0 else 0.1, dry_level=1.0, wet_level=reverb_amount) if reverb_amount > 0 else None,
+        
         Chorus(rate_hz=0.5, depth=0.05, mix=0.1) if humanize else None,
         Limiter(threshold_db=-1.0)
     ])
+    
     board = Pedalboard([effect for effect in board if effect is not None])
     effected_audio = board(audio_data, sample_rate)
+    
     if len(effected_audio.shape) > 1: effected_audio = effected_audio.T
     sf.write(output_path, effected_audio, sample_rate)
     return output_path
@@ -289,6 +407,7 @@ async def api_generate_tts(
     speaker_model: str = Form("Default Model"), 
     speed: float = Form(1.0),
     apply_humanize: bool = Form(False),
+    apply_breaths: bool = Form(False), # 🌟 NEW: n8n API parameter for breath insertion
     reference_audio: UploadFile = File(None),
     api_key: str = Depends(verify_api_key) 
 ):
@@ -305,7 +424,7 @@ async def api_generate_tts(
 
     raw_output_path = os.path.join(OUTPUT_DIR, f"{job_id}_raw.wav")
     try:
-        await generate_tts_safely(engine, mode, text, language, ref_audio_path, raw_output_path, speed, speaker_model)
+        await generate_tts_safely(engine, mode, text, language, ref_audio_path, raw_output_path, speed, speaker_model, apply_breaths)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -395,17 +514,17 @@ def gradio_video_edit(video_in, audio_in, trim_start, trim_end, mute_orig, force
         logs = append_log(logs, f"❌ VIDEO ERROR: {str(e)}")
         yield None, logs
 
-def gradio_tts(tts_mode, engine, custom_speaker, language, speed, text, instruct_prompt, ref_audio, current_logs):
+def gradio_tts(tts_mode, engine, custom_speaker, language, speed, text, instruct_prompt, ref_audio, apply_breaths, current_logs):
     cleanup_old_files()
     if not text.strip(): return None, None, "❌", append_log(current_logs, "❌ ERROR: No text")
-    logs = append_log(current_logs, f"🚀 START: Engine={engine}, Model={custom_speaker}")
-    yield None, None, "⏳ กำลังประมวลผล...", logs
+    logs = append_log(current_logs, f"🚀 START: Engine={engine}")
+    yield None, None, "⏳ กำลังประมวลผลและแทรกเสียงหายใจ (ถ้าเปิดไว้)...", logs
     
     out_path = os.path.join(OUTPUT_DIR, f"gradio_tts_{int(time.time())}.wav")
     
     try:
-        asyncio.run(generate_tts_safely(engine, tts_mode, text, language, ref_audio, out_path, speed, custom_speaker))
-        logs = append_log(logs, "✅ SUCCESS: สร้างเสียงสำเร็จ")
+        asyncio.run(generate_tts_safely(engine, tts_mode, text, language, ref_audio, out_path, speed, custom_speaker, apply_breaths))
+        logs = append_log(logs, "✅ SUCCESS: สร้างเสียงและ Foley สำเร็จ")
         yield out_path, out_path, "✅ สำเร็จ", logs
     except Exception as e:
         logs = append_log(logs, f"❌ ERROR: {str(e)}")
@@ -423,7 +542,7 @@ def gradio_studio(input_audio, preset, humanize, export_format, enable_gate, bas
     cleanup_old_files()
     if not input_audio: return None, "❌", append_log(current_logs, "❌ No input")
     try:
-        logs = append_log(current_logs, f"⚙️ START STUDIO: {preset}")
+        logs = append_log(current_logs, f"⚙️ START STUDIO: {preset} + Harmonic Saturation")
         ext = export_format.lower()
         output_file = os.path.join(OUTPUT_DIR, f"studio_{int(time.time())}.{ext}")
         apply_studio_mastering(input_audio, output_file, enable_gate, bass, treble, comp, reverb, drive, pitch, delay, humanize)
@@ -433,36 +552,43 @@ def gradio_studio(input_audio, preset, humanize, export_format, enable_gate, bas
         return None, str(e), append_log(current_logs, f"❌ ERROR: {str(e)}")
 
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
-    gr.Markdown("# 🎬 AI Media Studio (Audio & Vertical Video Production)")
+    gr.Markdown("# 🎬 AI Media Studio (Advanced Audio & Video Production)")
     system_logs_state = gr.State(value="")
     
     with gr.Row():
         with gr.Column(scale=3): 
-            with gr.Tab("🎙️ 1. Audio Tools"):
-                gr.Markdown("*(สร้างเสียงพากย์ด้วย AI ทั้งแบบ GPU และ CPU ที่รวดเร็ว)*")
+            with gr.Tab("🎙️ 1. Audio Tools & Foley"):
+                gr.Markdown("*(สร้างเสียงพากย์ด้วย AI และแทรกเสียงมนุษย์อัตโนมัติ)*")
                 with gr.Row():
                     with gr.Column():
                         engine_dropdown = gr.Radio(choices=["CosyVoice 3.0", "OmniVoice", "EdgeTTS (Fast CPU)"], value="EdgeTTS (Fast CPU)", label="Engine")
                         tts_mode = gr.Radio(choices=["Standard", "Instruct (Emotion)"], value="Standard", label="Mode")
                         dynamic_speakers = get_available_speakers()
                         speaker_dropdown = gr.Dropdown(choices=dynamic_speakers, value=dynamic_speakers[0], label="Speaker Model")
-                        lang_dropdown = gr.Dropdown(choices=["Thai (th)", "English (en)", "Chinese (zh)"], value="Thai (th)", label="Language")
-                        speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed")
                         
-                        text_input = gr.Textbox(label="Text Prompt", lines=4)
+                        with gr.Row():
+                            lang_dropdown = gr.Dropdown(choices=["Thai (th)", "English (en)", "Chinese (zh)"], value="Thai (th)", label="Language")
+                            speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed")
+                        
+                        # 🌟 NEW: Foley & Breaths Checkbox
+                        apply_breaths = gr.Checkbox(
+                            value=True, 
+                            label="🫁 แทรกเสียงสูดลมหายใจอัตโนมัติ (Foley Insertion)",
+                            info="ตรวจจับช่องว่างระหว่างประโยค (Silence Detection) และแทรกเสียงสูดลมหายใจแบบมนุษย์ลงไปให้อัตโนมัติ"
+                        )
+                        
+                        text_input = gr.Textbox(label="Text Prompt (รองรับการหั่นประโยคยาวอัตโนมัติ)", lines=4)
                         instruct_prompt = gr.Textbox(label="Instruction Prompt (Optional)")
                         
-                        # Note: We keep ref_audio in case user chooses Zero-Shot on UI, even though standard UI hides it. We'll pass None or dummy.
                         ref_audio_input = gr.Audio(label="Reference Audio", type="filepath", visible=False)
-                        
                         submit_btn = gr.Button("🚀 Generate Speech", variant="primary")
+                        
                     with gr.Column():
                         status_output = gr.Markdown("🟢 พร้อมใช้งาน")
                         output_audio = gr.Audio(label="Output Audio", interactive=False)
 
             with gr.Tab("📱 2. Social Media Video Automator"):
                 gr.Markdown("สร้างวิดีโอ 9:16 แนวตั้งอัตโนมัติ สำหรับ **Facebook Reels / TikTok / YouTube Shorts**")
-                
                 with gr.Row():
                     with gr.Column(scale=1):
                         video_input = gr.Video(label="🎥 อัปโหลด Footage วิดีโอพื้นหลัง", sources=["upload"])
@@ -472,22 +598,16 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                         with gr.Row():
                             force_916 = gr.Checkbox(value=True, label="📱 บังคับอัตราส่วน 9:16 (แนวตั้ง)")
                             mute_orig = gr.Checkbox(value=True, label="🔇 ลบเสียงดั้งเดิมของวิดีโอ")
-                        
                         with gr.Row():
                             trim_start = gr.Number(value=0, label="ตัดหัว (เริ่มวินาทีที่)")
                             trim_end = gr.Number(value=0, label="ตัดท้าย (สิ้นสุดวินาทีที่, 0 = ไม่ตัด)")
-                        
-                        text_lines = gr.Textbox(
-                            label="รายการข้อความ (บรรทัดละ 1 กล่องข้อความ)", 
-                            lines=8, 
-                            placeholder="1. เริ่ม DCA S&P500\\n2. ซื้อประกันสุขภาพ\\n3. สร้าง Emergency Fund..."
-                        )
-                        watermark_text = gr.Textbox(label="ลายน้ำ (มุมขวาล่าง)", placeholder="@SatangTheBank")
+                        text_lines = gr.Textbox(label="รายการข้อความ", lines=8)
+                        watermark_text = gr.Textbox(label="ลายน้ำ")
                         video_process_btn = gr.Button("🎬 เริ่มประมวลผลวิดีโอ (Render Video)", variant="primary", size="lg")
                         
                     with gr.Column(scale=1):
                         gr.Markdown("### 🌟 ผลลัพธ์วิดีโอ")
-                        video_output = gr.Video(label="✅ วิดีโอที่ตัดต่อเสร็จแล้ว พร้อมโพสต์", interactive=False)
+                        video_output = gr.Video(label="✅ วิดีโอพร้อมโพสต์", interactive=False)
 
         with gr.Column(scale=1): 
             gr.Markdown("### 💻 System Logs")
@@ -496,16 +616,11 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
 
     submit_btn.click(
         fn=gradio_tts, 
-        inputs=[tts_mode, engine_dropdown, speaker_dropdown, lang_dropdown, speed_slider, text_input, instruct_prompt, ref_audio_input, system_logs_state], 
+        inputs=[tts_mode, engine_dropdown, speaker_dropdown, lang_dropdown, speed_slider, text_input, instruct_prompt, ref_audio_input, apply_breaths, system_logs_state], 
         outputs=[output_audio, output_audio, status_output, system_logs_state]
     ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
     
-    video_process_btn.click(
-        fn=gradio_video_edit,
-        inputs=[video_input, audio_input_video, trim_start, trim_end, mute_orig, force_916, text_lines, watermark_text, system_logs_state],
-        outputs=[video_output, system_logs_state]
-    ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
-
+    video_process_btn.click(fn=gradio_video_edit, inputs=[video_input, audio_input_video, trim_start, trim_end, mute_orig, force_916, text_lines, watermark_text, system_logs_state], outputs=[video_output, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
     clear_log_btn.click(fn=lambda: ("", ""), inputs=None, outputs=[system_logs_state, logs_display])
 
 app = gr.mount_gradio_app(app, demo, path="/")
