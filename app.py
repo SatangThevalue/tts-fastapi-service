@@ -336,7 +336,8 @@ def _process_video_edit_sync(
 ):
     video = VideoFileClip(video_path)
     if trim_end is None or trim_end <= 0: trim_end = video.duration
-    video = video.subclip(trim_start, trim_end)
+    # In moviepy v2, subclip is replaced by subclipped
+    video = video.subclipped(trim_start, trim_end)
 
     if mute_original_audio: video = video.without_audio()
 
@@ -369,8 +370,7 @@ def _process_video_edit_sync(
         
     # Override ImageMagick binary path for Linux if needed (Fix for 'unset' error)
     if os.name == 'posix':
-        from moviepy.config import change_settings
-        change_settings({"IMAGEMAGICK_BINARY": "/usr/bin/convert"})
+        os.environ["IMAGEMAGICK_BINARY"] = "/usr/bin/convert"
             
     if text_lines and text_lines.strip():
         lines = text_lines.split("\n")
