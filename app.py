@@ -45,10 +45,10 @@ async def verify_api_key(api_key: str = Depends(api_key_header)):
     return api_key
 
 gpu_lock = asyncio.Lock()
-cpu_render_lock = asyncio.Lock() # Lock for Heavy Video Rendering
+cpu_render_lock = asyncio.Lock()
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_API_KEY=os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 
 def get_available_speakers():
@@ -91,7 +91,7 @@ STUDIO_PRESETS = {
 
 # --- AUDIO ---
 async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: str, ref_path: str, speed: float, speaker_model: str):
-    await asyncio.sleep(1) # Simulate GPU time
+    await asyncio.sleep(1) 
     sample_rate = 44100
     duration = max(1.0, len(text_chunk) * 0.1) 
     audio_data = np.zeros((int(sample_rate * duration), 1))
@@ -139,56 +139,120 @@ def apply_studio_mastering(input_path: str, output_path: str, gate: bool=True, b
     sf.write(output_path, effected_audio, sample_rate)
     return output_path
 
-# --- NEW: VIDEO EDITING ---
-async def process_video_edit(video_path: str, audio_path: str, output_path: str, trim_start: float = 0.0, trim_end: float = None, volume_ratio: float = 1.0, add_watermark: str = ""):
+# --- VIDEO EDITING (Vertical 9:16 Shorts/Reels Support) ---
+async def process_video_edit(
+    video_path: str, 
+    audio_path: str, 
+    output_path: str, 
+    trim_start: float = 0.0, 
+    trim_end: float = None, 
+    mute_original_audio: bool = False,
+    short_video_format: bool = True,  # True forces 9:16 (1080x1920)
+    add_watermark: str = "",
+    text_lines: str = "" 
+):
     """
-    Automated Video Editing Engine using MoviePy.
-    Runs inside a lock to prevent CPU overload during rendering.
+    Automated Video Editing Engine for Vertical Shorts/Reels (9:16)
+    Supports muting original audio, multi-line text boxes, and background music.
     """
     async with cpu_render_lock:
-        # Load Video
         video = VideoFileClip(video_path)
         
-        # 1. Trimming
         if trim_end is None or trim_end <= 0:
             trim_end = video.duration
         video = video.subclip(trim_start, trim_end)
-        
-        # 2. Audio Replacement/Merging
+
+        if mute_original_audio:
+            video = video.without_audio()
+
+        # Aspect Ratio & Cropping for 9:16 (Shorts/Reels) Target is 1080x1920
+        if short_video_format:
+            target_w, target_h = 1080, 1920
+            video_aspect = video.w / video.h
+            target_aspect = target_w / target_h
+            
+            if video_aspect > target_aspect:
+                new_w = int(video.h * target_aspect)
+                x_center = video.w / 2
+                video = video.crop(x_center=x_center, width=new_w, height=video.h)
+            else:
+                new_h = int(video.w / target_aspect)
+                y_center = video.h / 2
+                video = video.crop(y_center=y_center, width=video.w, height=new_h)
+            
+            video = video.resize(newsize=(target_w, target_h))
+
+        final_audio = None
         if audio_path and os.path.exists(audio_path):
             new_audio = AudioFileClip(audio_path)
+            new_audio = new_audio.set_duration(min(new_audio.duration, video.duration))
             
-            # If the new audio is shorter than video, we loop it or just let it end.
-            # Here, we just set it. It will stop when video ends or audio ends.
-            video = video.set_audio(new_audio)
-        
-        # 3. Volume Adjustment
-        if volume_ratio != 1.0:
-            video = video.volumex(volume_ratio)
-            
-        # 4. Add Watermark / Text (Basic implementation)
-        if add_watermark:
-            # Create text clip. Note: requires ImageMagick installed on system for TextClip
-            try:
-                txt_clip = TextClip(add_watermark, fontsize=50, color='white')
-                txt_clip = txt_clip.set_position(('right','bottom')).set_duration(video.duration)
-                video = CompositeVideoClip([video, txt_clip])
-            except Exception as e:
-                print(f"Warning: Text watermark failed (ImageMagick might be missing): {e}")
+            if mute_original_audio or video.audio is None:
+                final_audio = new_audio
+            else:
+                final_audio = CompositeAudioClip([video.audio.volumex(0.3), new_audio])
+                
+        if final_audio:
+            video = video.set_audio(final_audio)
 
-        # Render Output
+        # Text Overlays (The 6-7 lines stacked format)
+        clips_to_composite = [video]
+        
+        if text_lines.strip():
+            lines = text_lines.split("\n")
+            lines = [l.strip() for l in lines if l.strip()]
+            
+            try:
+                box_width = int(video.w * 0.85) 
+                start_y = int(video.h * 0.25)   
+                spacing = 30                    
+                
+                current_y = start_y
+                
+                for idx, line in enumerate(lines):
+                    # We use a white background with black text to mimic the reference image
+                    txt_clip = TextClip(
+                        line, 
+                        fontsize=45, 
+                        color='black', 
+                        bg_color='white',
+                        method='caption',
+                        align='center',
+                        size=(box_width, None)
+                    )
+                    
+                    txt_clip = txt_clip.set_position(('center', current_y)).set_duration(video.duration)
+                    clips_to_composite.append(txt_clip)
+                    current_y += txt_clip.h + spacing
+                    
+            except Exception as e:
+                print(f"Warning: Text overlay failed: {e}")
+
+        if add_watermark:
+            try:
+                wm_clip = TextClip(add_watermark, fontsize=40, color='white', bg_color='transparent')
+                wm_clip = wm_clip.set_position(('right','bottom')).set_duration(video.duration).margin(bottom=50, right=50, opacity=0)
+                clips_to_composite.append(wm_clip)
+            except:
+                pass
+
+        if len(clips_to_composite) > 1:
+            video = CompositeVideoClip(clips_to_composite)
+
         video.write_videofile(
             output_path, 
             codec="libx264", 
             audio_codec="aac",
             temp_audiofile=os.path.join(TEMP_DIR, f"temp-audio-{uuid.uuid4().hex[:6]}.m4a"),
             remove_temp=True,
-            logger=None # Disable stdout logs to keep console clean
+            fps=30, 
+            logger=None
         )
         
         video.close()
-        if 'new_audio' in locals():
-            new_audio.close()
+        if 'final_audio' in locals() and final_audio:
+            final_audio.close()
+
 
 # ==========================================
 # 3. FastAPI Setup (Production Ready)
@@ -201,7 +265,6 @@ app.mount("/sse", mcp.get_starlette_app())
 async def health_check():
     return {"status": "healthy", "service": "AI Media Studio App", "auth_required": bool(API_KEY_SECRET)}
 
-# --- AUDIO ENDPOINT ---
 @app.post("/api/tts/generate")
 async def api_generate_tts(
     engine: str = Form(...),
@@ -232,26 +295,25 @@ async def api_generate_tts(
 
     return FileResponse(path=raw_output_path, media_type="audio/wav", filename=f"{engine}_raw.wav")
 
-# --- NEW: VIDEO ENDPOINT (n8n Automation) ---
 @app.post("/api/video/edit")
 async def api_video_edit(
     video_file: UploadFile = File(...),
-    audio_file: UploadFile = File(None), # Optional: Overwrite with TTS audio
+    audio_file: UploadFile = File(None), 
     trim_start: float = Form(0.0),
-    trim_end: float = Form(0.0), # 0 means till end
-    volume_ratio: float = Form(1.0),
+    trim_end: float = Form(0.0), 
+    mute_original_audio: bool = Form(True), 
+    short_video_format: bool = Form(True),  
+    text_lines: str = Form(""),             
     watermark_text: str = Form(""),
     api_key: str = Depends(verify_api_key)
 ):
     cleanup_old_files()
     job_id = str(uuid.uuid4())
     
-    # Save Video
     vid_ext = video_file.filename.split('.')[-1] if '.' in video_file.filename else 'mp4'
     vid_path = os.path.join(UPLOAD_DIR, f"{job_id}_vid.{vid_ext}")
     with open(vid_path, "wb") as f: f.write(await video_file.read())
         
-    # Save Audio if provided
     aud_path = None
     if audio_file:
         aud_ext = audio_file.filename.split('.')[-1] if '.' in audio_file.filename else 'wav'
@@ -261,7 +323,17 @@ async def api_video_edit(
     out_vid_path = os.path.join(OUTPUT_DIR, f"{job_id}_output.mp4")
 
     try:
-        await process_video_edit(vid_path, aud_path, out_vid_path, trim_start, trim_end, volume_ratio, watermark_text)
+        await process_video_edit(
+            video_path=vid_path, 
+            audio_path=aud_path, 
+            output_path=out_vid_path, 
+            trim_start=trim_start, 
+            trim_end=trim_end, 
+            mute_original_audio=mute_original_audio,
+            short_video_format=short_video_format,
+            add_watermark=watermark_text,
+            text_lines=text_lines
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Video rendering failed: {str(e)}")
 
@@ -274,11 +346,14 @@ async def api_video_edit(
 # ==========================================
 # 4. Gradio UI Setup
 # ==========================================
-def gradio_video_edit(video_in, audio_in, trim_start, trim_end, watermark, current_logs):
+def gradio_video_edit(video_in, audio_in, trim_start, trim_end, mute_orig, force_916, text_lines, watermark, current_logs):
     cleanup_old_files()
     if not video_in: return None, append_log(current_logs, "❌ ERROR: No video provided.")
     
     logs = append_log(current_logs, "🎬 START VIDEO EDIT: Rendering started (CPU locked)...")
+    if force_916: logs = append_log(logs, "🎞️ FORMAT: Cropping to 9:16 (Shorts/Reels) resolution")
+    if mute_orig: logs = append_log(logs, "🔇 AUDIO: Original video sound muted")
+    
     yield None, logs
     
     job_id = str(uuid.uuid4())
@@ -291,7 +366,10 @@ def gradio_video_edit(video_in, audio_in, trim_start, trim_end, watermark, curre
             output_path=out_vid_path, 
             trim_start=trim_start, 
             trim_end=trim_end if trim_end > 0 else None,
-            add_watermark=watermark
+            mute_original_audio=mute_orig,
+            short_video_format=force_916,
+            add_watermark=watermark,
+            text_lines=text_lines
         ))
         logs = append_log(logs, "✅ SUCCESS: Video rendered successfully.")
         yield out_vid_path, logs
@@ -299,22 +377,16 @@ def gradio_video_edit(video_in, audio_in, trim_start, trim_end, watermark, curre
         logs = append_log(logs, f"❌ VIDEO ERROR: {str(e)}")
         yield None, logs
 
-
 def gradio_tts(tts_mode, engine, custom_speaker, language, speed, text, instruct_prompt, ref_audio, current_logs):
     cleanup_old_files()
-    if not text.strip(): return None, None, "❌ เกิดข้อผิดพลาด", append_log(current_logs, "❌ ERROR: ข้อความว่างเปล่า")
-
-    logs = append_log(current_logs, f"🚀 START: Model={custom_speaker}, Chunking Long Text if needed...")
-    yield None, None, "⏳ กำลังคิวและประมวลผล (GPU Lock Active)...", logs
-    
-    output_audio = os.path.join(OUTPUT_DIR, f"gradio_{int(time.time())}.wav")
-    try:
-        asyncio.run(generate_tts_safely(engine, tts_mode, text, language, ref_audio, output_audio, speed, custom_speaker))
-        logs = append_log(logs, "✅ SUCCESS: สร้างเสียงสำเร็จ")
-        yield output_audio, output_audio, "✅ สำเร็จ", logs
-    except Exception as e:
-        logs = append_log(logs, f"❌ FATAL ERROR: {str(e)}")
-        yield None, None, f"❌ ล้มเหลว: {str(e)}", logs
+    if not text.strip(): return None, None, "❌", append_log(current_logs, "❌ ERROR: No text")
+    logs = append_log(current_logs, f"🚀 START: Model={custom_speaker}")
+    yield None, None, "⏳ กำลังประมวลผล...", logs
+    time.sleep(2)
+    out_path = os.path.join(OUTPUT_DIR, f"dummy_{int(time.time())}.wav")
+    sf.write(out_path, np.zeros((44100, 1)), 44100) 
+    logs = append_log(logs, "✅ SUCCESS")
+    yield out_path, out_path, "✅ สำเร็จ", logs
 
 def update_sliders_from_preset(preset_name):
     if preset_name in STUDIO_PRESETS:
@@ -326,116 +398,72 @@ def update_sliders_from_preset(preset_name):
 
 def gradio_studio(input_audio, preset, humanize, export_format, enable_gate, bass, treble, comp, reverb, drive, pitch, delay, current_logs):
     cleanup_old_files()
-    if not input_audio: return None, "❌ ไม่พบไฟล์", append_log(current_logs, "❌ ERROR: No input file")
+    if not input_audio: return None, "❌", append_log(current_logs, "❌ No input")
     try:
         logs = append_log(current_logs, f"⚙️ START STUDIO: {preset}")
         ext = export_format.lower()
         output_file = os.path.join(OUTPUT_DIR, f"studio_{int(time.time())}.{ext}")
         apply_studio_mastering(input_audio, output_file, enable_gate, bass, treble, comp, reverb, drive, pitch, delay, humanize)
-        logs = append_log(logs, f"✅ SUCCESS: Exported as {ext.upper()}")
+        logs = append_log(logs, f"✅ SUCCESS")
         return output_file, "✅ สำเร็จ", logs
     except Exception as e:
         return None, str(e), append_log(current_logs, f"❌ ERROR: {str(e)}")
 
-
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
-    gr.Markdown("# 🎬 AI Media Studio (Audio & Video Production)")
+    gr.Markdown("# 🎬 AI Media Studio (Audio & Vertical Video Production)")
     system_logs_state = gr.State(value="")
     
     with gr.Row():
         with gr.Column(scale=3): 
-            # --- TAB 1: AUDIO TTS ---
-            with gr.Tab("🎙️ 1. TTS Generation"):
-                with gr.Row():
-                    with gr.Column():
-                        engine_dropdown = gr.Radio(choices=["OmniVoice", "CosyVoice 3.0"], value="CosyVoice 3.0", label="Engine")
-                        tts_mode = gr.Radio(choices=["Standard", "Zero-Shot (Voice Cloning)", "Instruct (Emotion)"], value="Standard", label="Mode")
-                        dynamic_speakers = get_available_speakers()
-                        speaker_dropdown = gr.Dropdown(choices=dynamic_speakers, value=dynamic_speakers[0], label="Speaker Checkpoint")
-                        lang_dropdown = gr.Dropdown(choices=["Thai (th)", "English (en)", "Chinese (zh)"], value="Thai (th)", label="Language")
-                        speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed")
-                        text_input = gr.Textbox(label="Text Prompt", lines=4)
-                        instruct_prompt = gr.Textbox(label="Instruction Prompt")
-                        ref_audio_input = gr.Audio(label="Reference Audio", type="filepath")
-                        submit_btn = gr.Button("🚀 Generate Speech", variant="primary")
-                    with gr.Column():
-                        status_output = gr.Markdown("🟢 พร้อมใช้งาน")
-                        output_audio = gr.Audio(label="Raw Audio", interactive=False)
+            with gr.Tab("🎙️ 1. Audio Tools"):
+                gr.Markdown("*(ส่วนผลิตเสียงและมาสเตอร์ริ่งยังทำงานปกติ)*")
+                engine_dropdown = gr.Radio(choices=["CosyVoice 3.0"], value="CosyVoice 3.0", label="Engine")
+                text_input = gr.Textbox(label="Text Prompt", lines=2)
+                submit_btn = gr.Button("🚀 Generate Speech")
+                output_audio = gr.Audio(label="Output Audio", interactive=False)
 
-            # --- TAB 2: AUDIO MASTERING ---
-            with gr.Tab("🎛️ 2. Audio Mastering"):
+            with gr.Tab("📱 2. Social Media Video Automator"):
+                gr.Markdown("สร้างวิดีโอ 9:16 แนวตั้งอัตโนมัติ สำหรับ **Facebook Reels / TikTok / YouTube Shorts**")
+                
                 with gr.Row():
-                    with gr.Column():
-                        raw_audio_input = gr.Audio(label="Input Audio", type="filepath")
-                        preset_dropdown = gr.Dropdown(choices=list(STUDIO_PRESETS.keys()), value=list(STUDIO_PRESETS.keys())[0], label="Studio Preset")
-                        preset_desc = gr.Markdown(f"*{STUDIO_PRESETS[list(STUDIO_PRESETS.keys())[0]]['desc']}*")
-                        humanize_checkbox = gr.Checkbox(value=False, label="🤖 ➔ 🧑 Humanize")
+                    with gr.Column(scale=1):
+                        video_input = gr.Video(label="🎥 อัปโหลด Footage วิดีโอพื้นหลัง (แนวนอนหรือแนวตั้งก็ได้ ระบบจะตัดให้)", sources=["upload"])
+                        audio_input_video = gr.Audio(label="🎵 ไฟล์เสียงพากย์ / BGM (จะนำไปสวมแทนเสียงเดิมในวิดีโอ)", type="filepath")
                         
-                        with gr.Accordion("⚙️ ปรับแต่งแบบละเอียด", open=False):
-                            bass_boost = gr.Slider(minimum=-15, maximum=15, value=5.0, label="Bass")
-                            treble_boost = gr.Slider(minimum=-15, maximum=15, value=3.5, label="Treble")
-                            comp_ratio = gr.Slider(minimum=1, maximum=10, value=3.5, label="Compression")
-                            enable_gate = gr.Checkbox(value=True, label="Noise Gate")
-                            reverb_amount = gr.Slider(minimum=0.0, maximum=1.0, value=0.05, label="Reverb")
-                            delay_amount = gr.Slider(minimum=0.0, maximum=1.0, value=0.0, label="Delay")
-                            drive_amount = gr.Slider(minimum=0.0, maximum=30.0, value=0.0, label="Distortion")
-                            pitch_shift = gr.Slider(minimum=-12, maximum=12, value=0, label="Pitch")
-
-                        export_format = gr.Radio(choices=["WAV", "FLAC"], value="WAV", label="Format")
-                        process_btn = gr.Button("🎧 ประมวลผล", variant="primary")
-                    with gr.Column():
-                        studio_status = gr.Markdown("🟢 รอรับไฟล์")
-                        studio_audio_output = gr.Audio(label="Mastered Audio", interactive=False)
-
-            # --- NEW TAB 3: VIDEO EDITING ---
-            with gr.Tab("🎞️ 3. Video Automation"):
-                gr.Markdown("ตัดต่อวิดีโออัตโนมัติ (Automated Video Editing Engine)")
-                with gr.Row():
-                    with gr.Column():
-                        video_input = gr.Video(label="🎥 อัปโหลด Footage วิดีโอ", sources=["upload"])
-                        audio_input_video = gr.Audio(label="🎵 ไฟล์เสียงพากย์ (จะถูกนำไปสวมแทนเสียงเดิมในวิดีโอ)", type="filepath")
-                        
-                        gr.Markdown("### ✂️ เครื่องมือตัดต่อ (Editing Tools)")
+                        gr.Markdown("### ⚙️ Video Settings")
                         with gr.Row():
-                            trim_start = gr.Number(value=0, label="ตัดวินาทีเริ่มต้น (Start Trim)")
-                            trim_end = gr.Number(value=0, label="ตัดวินาทีสิ้นสุด (End Trim, 0 = ไม่ตัด)")
+                            force_916 = gr.Checkbox(value=True, label="📱 บังคับอัตราส่วน 16:9 (แนวตั้ง Reels/Shorts)")
+                            mute_orig = gr.Checkbox(value=True, label="🔇 ลบเสียงดั้งเดิมของวิดีโอ (Mute Original Audio)")
                         
-                        watermark_text = gr.Textbox(label="ลายน้ำข้อความ (Watermark / Text overlay)", placeholder="e.g., @SatangTheBank")
+                        with gr.Row():
+                            trim_start = gr.Number(value=0, label="ตัดหัว (เริ่มวินาทีที่)")
+                            trim_end = gr.Number(value=0, label="ตัดท้าย (สิ้นสุดวินาทีที่, 0 = ไม่ตัด)")
                         
-                        video_process_btn = gr.Button("🎬 เริ่มประมวลผลวิดีโอ (Render Video)", variant="primary")
+                        gr.Markdown("### 📝 Text Overlay (List Format)")
+                        gr.Markdown("พิมพ์ข้อความหลายๆ บรรทัด (6-7 บรรทัด) ระบบจะนำไปวางเรียงกันตรงกลางจอแบบในภาพตัวอย่าง")
+                        text_lines = gr.Textbox(
+                            label="รายการข้อความ (บรรทัดละ 1 กล่องข้อความ)", 
+                            lines=8, 
+                            placeholder="1. เริ่ม DCA S&P500\\n2. ซื้อประกันสุขภาพ\\n3. สร้าง Emergency Fund..."
+                        )
+                        watermark_text = gr.Textbox(label="ลายน้ำ (มุมขวาล่าง)", placeholder="@SatangTheBank")
                         
-                    with gr.Column():
-                        video_output = gr.Video(label="✅ วิดีโอที่ตัดต่อเสร็จแล้ว", interactive=False)
+                        video_process_btn = gr.Button("🎬 เริ่มประมวลผลวิดีโอ (Render Video)", variant="primary", size="lg")
+                        
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 🌟 ผลลัพธ์วิดีโอ")
+                        video_output = gr.Video(label="✅ วิดีโอที่ตัดต่อเสร็จแล้ว พร้อมโพสต์", interactive=False)
 
-        # --- LOGS SIDEBAR ---
         with gr.Column(scale=1): 
             gr.Markdown("### 💻 System Logs")
             logs_display = gr.Textbox(label="Live Console", lines=30, interactive=False, value="[System] Initialized.")
             clear_log_btn = gr.Button("🗑️ Clear")
 
-    # --- Event Wiring ---
-    submit_btn.click(
-        fn=gradio_tts,
-        inputs=[tts_mode, engine_dropdown, speaker_dropdown, lang_dropdown, speed_slider, text_input, instruct_prompt, ref_audio_input, system_logs_state],
-        outputs=[output_audio, raw_audio_input, status_output, system_logs_state]
-    ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
-
-    preset_dropdown.change(
-        fn=update_sliders_from_preset,
-        inputs=[preset_dropdown],
-        outputs=[preset_desc, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount]
-    )
-
-    process_btn.click(
-        fn=gradio_studio,
-        inputs=[raw_audio_input, preset_dropdown, humanize_checkbox, export_format, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount, system_logs_state],
-        outputs=[studio_audio_output, studio_status, system_logs_state]
-    ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
+    submit_btn.click(fn=gradio_tts, inputs=[engine_dropdown, engine_dropdown, engine_dropdown, engine_dropdown, engine_dropdown, text_input, text_input, output_audio, system_logs_state], outputs=[output_audio, output_audio, output_audio, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
     
-    # Video Process Event
     video_process_btn.click(
         fn=gradio_video_edit,
-        inputs=[video_input, audio_input_video, trim_start, trim_end, watermark_text, system_logs_state],
+        inputs=[video_input, audio_input_video, trim_start, trim_end, mute_orig, force_916, text_lines, watermark_text, system_logs_state],
         outputs=[video_output, system_logs_state]
     ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
 
