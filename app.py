@@ -273,10 +273,11 @@ async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str,
         else:
             sf.write(temp_concat_path, np.zeros((sample_rate, 1)), sample_rate)
             
-    await asyncio.to_thread(write_concat)
+    # Remove to_thread because numpy concat and sf.write are very fast for audio and don't need heavy thread spawning
+    write_concat()
 
     if apply_breaths:
-        await asyncio.to_thread(insert_breaths, temp_concat_path, out_path)
+        insert_breaths(temp_concat_path, out_path)
         os.remove(temp_concat_path)
     else:
         os.rename(temp_concat_path, out_path)
@@ -401,7 +402,7 @@ def _process_video_edit_sync(
 
     if len(clips_to_composite) > 1: video = CompositeVideoClip(clips_to_composite)
 
-    # Video rendering options configured for higher compatibility and speed
+    # Try an extremely safe render profile for MoviePy v2
     try:
         video.write_videofile(
             output_path, 
@@ -409,10 +410,10 @@ def _process_video_edit_sync(
             audio_codec="aac",
             temp_audiofile=os.path.join(TEMP_DIR, f"temp-audio-{uuid.uuid4().hex[:6]}.m4a"),
             remove_temp=True, 
-            fps=25,          # Lower FPS to ensure faster CPU rendering
+            fps=24,          
             logger=None,
-            threads=2,       # Reduced threads to prevent deadlocks
-            preset="ultrafast" # Ultra fast encoding to prevent Timeout
+            threads=1,       # Force single thread to prevent any deadlocks
+            preset="ultrafast" 
         )
     except Exception as e:
         print(f"Render Error: {e}")
