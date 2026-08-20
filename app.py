@@ -36,7 +36,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 SPEAKERS_DIR = os.path.join(os.path.dirname(__file__), "pretrained_models", "speakers")
 os.makedirs(SPEAKERS_DIR, exist_ok=True)
 
-API_KEY_SECRET=os.environ.get("API_KEY", "") 
+API_KEY_SECRET = os.environ.get("TTS_API_KEY", "") 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def verify_api_key(api_key: str = Depends(api_key_header)):
@@ -48,7 +48,7 @@ gpu_lock = asyncio.Lock()
 cpu_render_lock = asyncio.Lock()
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
-LLM_API_KEY=os.environ.get("LLM_API_KEY", "")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 
 def get_available_speakers():
@@ -76,9 +76,6 @@ def append_log(current_logs, new_message):
     if len(logs_list) > 20: logs_list = logs_list[-20:]
     return "\n".join(logs_list)
 
-# ==========================================
-# 1. Studio Presets Configuration
-# ==========================================
 STUDIO_PRESETS = {
     "🎙️ Podcast Studio": {"bass": 5.0, "treble": 3.5, "comp": 3.5, "reverb": 0.05, "gate": True, "drive": 0.0, "pitch": 0, "delay": 0.0, "desc": "นุ่มลึก มีน้ำหนัก ฟังสบาย"},
     "📖 Audiobook Pro": {"bass": 2.0, "treble": 2.0, "comp": 2.5, "reverb": 0.15, "gate": True, "drive": 0.0, "pitch": 0, "delay": 0.0, "desc": "ใสสะอาด มีมิติเสียงก้องนิดๆ"},
@@ -89,7 +86,6 @@ STUDIO_PRESETS = {
 # 2. AI Audio & Video Operations
 # ==========================================
 
-# --- AUDIO ---
 async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: str, ref_path: str, speed: float, speaker_model: str):
     await asyncio.sleep(1) 
     sample_rate = 44100
@@ -139,7 +135,6 @@ def apply_studio_mastering(input_path: str, output_path: str, gate: bool=True, b
     sf.write(output_path, effected_audio, sample_rate)
     return output_path
 
-# --- VIDEO EDITING (Vertical 9:16 Shorts/Reels Support) ---
 async def process_video_edit(
     video_path: str, 
     audio_path: str, 
@@ -147,14 +142,10 @@ async def process_video_edit(
     trim_start: float = 0.0, 
     trim_end: float = None, 
     mute_original_audio: bool = False,
-    short_video_format: bool = True,  # True forces 9:16 (1080x1920)
+    short_video_format: bool = True,  
     add_watermark: str = "",
     text_lines: str = "" 
 ):
-    """
-    Automated Video Editing Engine for Vertical Shorts/Reels (9:16)
-    Supports muting original audio, multi-line text boxes, and background music.
-    """
     async with cpu_render_lock:
         video = VideoFileClip(video_path)
         
@@ -165,7 +156,6 @@ async def process_video_edit(
         if mute_original_audio:
             video = video.without_audio()
 
-        # Aspect Ratio & Cropping for 9:16 (Shorts/Reels) Target is 1080x1920
         if short_video_format:
             target_w, target_h = 1080, 1920
             video_aspect = video.w / video.h
@@ -195,36 +185,21 @@ async def process_video_edit(
         if final_audio:
             video = video.set_audio(final_audio)
 
-        # Text Overlays (The 6-7 lines stacked format)
         clips_to_composite = [video]
         
         if text_lines.strip():
             lines = text_lines.split("\n")
             lines = [l.strip() for l in lines if l.strip()]
-            
             try:
                 box_width = int(video.w * 0.85) 
                 start_y = int(video.h * 0.25)   
                 spacing = 30                    
-                
                 current_y = start_y
-                
                 for idx, line in enumerate(lines):
-                    # We use a white background with black text to mimic the reference image
-                    txt_clip = TextClip(
-                        line, 
-                        fontsize=45, 
-                        color='black', 
-                        bg_color='white',
-                        method='caption',
-                        align='center',
-                        size=(box_width, None)
-                    )
-                    
+                    txt_clip = TextClip(line, fontsize=45, color='black', bg_color='white', method='caption', align='center', size=(box_width, None))
                     txt_clip = txt_clip.set_position(('center', current_y)).set_duration(video.duration)
                     clips_to_composite.append(txt_clip)
                     current_y += txt_clip.h + spacing
-                    
             except Exception as e:
                 print(f"Warning: Text overlay failed: {e}")
 
@@ -297,31 +272,48 @@ async def api_generate_tts(
 
 @app.post("/api/video/edit")
 async def api_video_edit(
-    video_file: UploadFile = File(...),
+    # Accept either UploadFile OR Local Path string
+    video_file: UploadFile = File(None),
+    video_local_path: str = Form(""),
+    
     audio_file: UploadFile = File(None), 
+    audio_local_path: str = Form(""),
+    
     trim_start: float = Form(0.0),
     trim_end: float = Form(0.0), 
     mute_original_audio: bool = Form(True), 
     short_video_format: bool = Form(True),  
     text_lines: str = Form(""),             
     watermark_text: str = Form(""),
+    return_local_path: bool = Form(False), # New option: return JSON path instead of file stream
     api_key: str = Depends(verify_api_key)
 ):
     cleanup_old_files()
     job_id = str(uuid.uuid4())
     
-    vid_ext = video_file.filename.split('.')[-1] if '.' in video_file.filename else 'mp4'
-    vid_path = os.path.join(UPLOAD_DIR, f"{job_id}_vid.{vid_ext}")
-    with open(vid_path, "wb") as f: f.write(await video_file.read())
+    # 1. Resolve Video Path (Prioritize Local Path if provided)
+    vid_path = None
+    if video_local_path and os.path.exists(video_local_path):
+        vid_path = video_local_path
+    elif video_file:
+        vid_ext = video_file.filename.split('.')[-1] if '.' in video_file.filename else 'mp4'
+        vid_path = os.path.join(UPLOAD_DIR, f"{job_id}_vid.{vid_ext}")
+        with open(vid_path, "wb") as f: f.write(await video_file.read())
+    else:
+        raise HTTPException(status_code=400, detail="Must provide either video_file or video_local_path")
         
+    # 2. Resolve Audio Path (Prioritize Local Path if provided)
     aud_path = None
-    if audio_file:
+    if audio_local_path and os.path.exists(audio_local_path):
+        aud_path = audio_local_path
+    elif audio_file:
         aud_ext = audio_file.filename.split('.')[-1] if '.' in audio_file.filename else 'wav'
         aud_path = os.path.join(UPLOAD_DIR, f"{job_id}_aud.{aud_ext}")
         with open(aud_path, "wb") as f: f.write(await audio_file.read())
 
     out_vid_path = os.path.join(OUTPUT_DIR, f"{job_id}_output.mp4")
 
+    # 3. Render
     try:
         await process_video_edit(
             video_path=vid_path, 
@@ -340,6 +332,12 @@ async def api_video_edit(
     if not os.path.exists(out_vid_path):
         raise HTTPException(status_code=500, detail="Video was not generated.")
 
+    # 4. Return Strategy
+    if return_local_path:
+        # Ideal for Same-Server Docker (n8n reads directly from path)
+        return JSONResponse(content={"status": "success", "output_path": out_vid_path})
+    
+    # Normal stream download
     return FileResponse(path=out_vid_path, media_type="video/mp4", filename="edited_video.mp4")
 
 
@@ -349,28 +347,16 @@ async def api_video_edit(
 def gradio_video_edit(video_in, audio_in, trim_start, trim_end, mute_orig, force_916, text_lines, watermark, current_logs):
     cleanup_old_files()
     if not video_in: return None, append_log(current_logs, "❌ ERROR: No video provided.")
-    
     logs = append_log(current_logs, "🎬 START VIDEO EDIT: Rendering started (CPU locked)...")
-    if force_916: logs = append_log(logs, "🎞️ FORMAT: Cropping to 9:16 (Shorts/Reels) resolution")
-    if mute_orig: logs = append_log(logs, "🔇 AUDIO: Original video sound muted")
-    
+    if force_916: logs = append_log(logs, "🎞️ FORMAT: Cropping to 9:16")
+    if mute_orig: logs = append_log(logs, "🔇 AUDIO: Original video muted")
     yield None, logs
     
     job_id = str(uuid.uuid4())
     out_vid_path = os.path.join(OUTPUT_DIR, f"{job_id}_ui_output.mp4")
     
     try:
-        asyncio.run(process_video_edit(
-            video_path=video_in, 
-            audio_path=audio_in, 
-            output_path=out_vid_path, 
-            trim_start=trim_start, 
-            trim_end=trim_end if trim_end > 0 else None,
-            mute_original_audio=mute_orig,
-            short_video_format=force_916,
-            add_watermark=watermark,
-            text_lines=text_lines
-        ))
+        asyncio.run(process_video_edit(video_path=video_in, audio_path=audio_in, output_path=out_vid_path, trim_start=trim_start, trim_end=trim_end if trim_end > 0 else None, mute_original_audio=mute_orig, short_video_format=force_916, add_watermark=watermark, text_lines=text_lines))
         logs = append_log(logs, "✅ SUCCESS: Video rendered successfully.")
         yield out_vid_path, logs
     except Exception as e:
@@ -439,15 +425,12 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                             trim_start = gr.Number(value=0, label="ตัดหัว (เริ่มวินาทีที่)")
                             trim_end = gr.Number(value=0, label="ตัดท้าย (สิ้นสุดวินาทีที่, 0 = ไม่ตัด)")
                         
-                        gr.Markdown("### 📝 Text Overlay (List Format)")
-                        gr.Markdown("พิมพ์ข้อความหลายๆ บรรทัด (6-7 บรรทัด) ระบบจะนำไปวางเรียงกันตรงกลางจอแบบในภาพตัวอย่าง")
                         text_lines = gr.Textbox(
                             label="รายการข้อความ (บรรทัดละ 1 กล่องข้อความ)", 
                             lines=8, 
                             placeholder="1. เริ่ม DCA S&P500\\n2. ซื้อประกันสุขภาพ\\n3. สร้าง Emergency Fund..."
                         )
                         watermark_text = gr.Textbox(label="ลายน้ำ (มุมขวาล่าง)", placeholder="@SatangTheBank")
-                        
                         video_process_btn = gr.Button("🎬 เริ่มประมวลผลวิดีโอ (Render Video)", variant="primary", size="lg")
                         
                     with gr.Column(scale=1):
