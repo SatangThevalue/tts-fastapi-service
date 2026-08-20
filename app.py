@@ -205,10 +205,15 @@ async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: s
         
         def run_piper():
             voice = PiperVoice.load(model_path)
-            with open(temp_wav, "wb") as wav_file:
-                voice.synthesize(text_chunk, wav_file, length_scale=1.0/speed)
+            # Piper writes raw audio directly. We use its internal structure to get a wav
+            with wave.open(temp_wav, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(22050) # Standard piper sample rate
+                voice.synthesize(text_chunk, wav_file)
             return sf.read(temp_wav)
                 
+        import wave
         audio_data, sr = await asyncio.to_thread(run_piper)
         os.remove(temp_wav)
         if len(audio_data.shape) == 1: audio_data = audio_data.reshape(-1, 1)
@@ -363,7 +368,12 @@ def _process_video_edit_sync(
     clips_to_composite = [video]
     
     font_arg = DEFAULT_THAI_FONT_PATH if os.path.exists(DEFAULT_THAI_FONT_PATH) else 'Arial'
-    
+        
+    # Override ImageMagick binary path for Linux if needed (Fix for 'unset' error)
+    if os.name == 'posix':
+        from moviepy.config import change_settings
+        change_settings({"IMAGEMAGICK_BINARY": "/usr/bin/convert"})
+            
     if text_lines and text_lines.strip():
         lines = text_lines.split("\n")
         lines = [l.strip() for l in lines if l.strip()]
@@ -593,7 +603,7 @@ def toggle_engine_visibility(engine):
     is_gpu = engine in ["CosyVoice 3.0", "OmniVoice"]
     return gr.update(visible=is_gpu), gr.update(visible=is_piper)
 
-with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
+with gr.Blocks() as demo:
     gr.Markdown("# 🎬 AI Media Studio (Pro Edition)")
     system_logs_state = gr.State(value="")
     
@@ -713,7 +723,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
     video_process_btn.click(fn=gradio_video_edit, inputs=[video_input, audio_input_video, trim_start, trim_end, mute_orig, force_916, text_lines, watermark_text, system_logs_state], outputs=[video_output, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
     clear_log_btn.click(fn=lambda: ("", ""), inputs=None, outputs=[system_logs_state, logs_display])
 
-app = gr.mount_gradio_app(app, demo, path="/")
+app = gr.mount_gradio_app(app, demo, path="/", theme=gr.themes.Soft(primary_hue="blue"))
 
 if __name__ == "__main__":
     import uvicorn
