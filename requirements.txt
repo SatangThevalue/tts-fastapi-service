@@ -1,15 +1,28 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-pydantic==2.5.2
-python-multipart==0.0.6
+# Core Web Framework
+fastapi>=0.104.1
+uvicorn>=0.24.0
+pydantic>=2.5.2
+python-multipart>=0.0.9
+
+# UI & AI Frameworks
 gradio>=4.0.0
-pedalboard==0.9.8
-soundfile==0.12.1
-mcp>=0.1.0
+mcp>=1.0.0
+
+# Audio & Post-Processing
+pedalboard>=0.9.8
+soundfile>=0.12.1
+
+# HTTP & Math
 httpx>=0.25.0
 numpy>=1.24.0
-moviepy==1.0.3
+
+# Video Editing
+moviepy>=1.0.3
 Pillow>=9.0.0
-# New dependencies for CPU-friendly TTS and Thai language
-edge-tts==6.1.9
+
+# CPU-based TTS & Text Processing
+edge-tts>=6.1.9
 PyThaiNLP>=4.0.0
+
+# Offline CPU TTS
+piper-tts>=1.2.0
