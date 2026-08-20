@@ -16,6 +16,9 @@ from pedalboard import Pedalboard, Compressor, HighpassFilter, LowShelfFilter, H
 # Video Editing (MoviePy)
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip, CompositeAudioClip
 
+# CPU-based TTS
+import edge_tts
+
 # FastAPI & Gradio
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, Depends
 from fastapi.responses import FileResponse, JSONResponse
@@ -36,7 +39,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 SPEAKERS_DIR = os.path.join(os.path.dirname(__file__), "pretrained_models", "speakers")
 os.makedirs(SPEAKERS_DIR, exist_ok=True)
 
-API_KEY_SECRET = os.environ.get("TTS_API_KEY", "") 
+API_KEY_SECRET=os.environ.get("TTS_API_KEY", "") 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def verify_api_key(api_key: str = Depends(api_key_header)):
@@ -48,7 +51,7 @@ gpu_lock = asyncio.Lock()
 cpu_render_lock = asyncio.Lock()
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_API_KEY=os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 
 def get_available_speakers():
@@ -87,11 +90,37 @@ STUDIO_PRESETS = {
 # ==========================================
 
 async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: str, ref_path: str, speed: float, speaker_model: str):
-    await asyncio.sleep(1) 
+    """Generates audio for a chunk. Handles both GPU models (mocked) and CPU-fast models."""
     sample_rate = 44100
-    duration = max(1.0, len(text_chunk) * 0.1) 
-    audio_data = np.zeros((int(sample_rate * duration), 1))
-    return audio_data, sample_rate
+    
+    if engine == "EdgeTTS (Fast CPU)":
+        # 🌟 NEW CPU-BASED TTS (No GPU required, lightning fast)
+        voice = "th-TH-PremwadeeNeural" if "th" in lang.lower() else "en-US-AriaNeural"
+        
+        # Edge-tts uses string formats like "+0%" or "+10%" for speed
+        speed_percent = int((speed - 1.0) * 100)
+        speed_str = f"+{speed_percent}%" if speed_percent >= 0 else f"{speed_percent}%"
+        
+        communicate = edge_tts.Communicate(text_chunk, voice, rate=speed_str)
+        
+        temp_mp3 = os.path.join(TEMP_DIR, f"edge_{uuid.uuid4().hex}.mp3")
+        await communicate.save(temp_mp3)
+        
+        audio_data, sr = sf.read(temp_mp3)
+        os.remove(temp_mp3)
+        
+        if len(audio_data.shape) == 1:
+            audio_data = audio_data.reshape(-1, 1)
+            
+        return audio_data, sr
+        
+    else:
+        # OmniVoice / CosyVoice (GPU Mock)
+        await asyncio.sleep(1) 
+        duration = max(1.0, len(text_chunk) * 0.1) 
+        audio_data = np.zeros((int(sample_rate * duration), 1))
+        return audio_data, sample_rate
+
 
 async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str, ref_path: str, out_path: str, speed: float = 1.0, speaker_model: str = "Default Model"):
     chunks = re.split(r'(?<=[.!?\n])\s+', full_text.strip())
@@ -99,7 +128,8 @@ async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str,
     if not chunks: chunks = [full_text]
     all_audio_arrays = []
     sample_rate = 44100
-    async with gpu_lock:
+    
+    if engine == "EdgeTTS (Fast CPU)":
         for chunk in chunks:
             if not chunk.strip(): continue
             audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, speaker_model)
@@ -107,6 +137,16 @@ async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str,
             all_audio_arrays.append(audio_data)
             pause = np.zeros((int(sample_rate * 0.2), audio_data.shape[1] if len(audio_data.shape) > 1 else 1))
             all_audio_arrays.append(pause)
+    else:
+        async with gpu_lock:
+            for chunk in chunks:
+                if not chunk.strip(): continue
+                audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, speaker_model)
+                sample_rate = sr
+                all_audio_arrays.append(audio_data)
+                pause = np.zeros((int(sample_rate * 0.2), audio_data.shape[1] if len(audio_data.shape) > 1 else 1))
+                all_audio_arrays.append(pause)
+                
     if all_audio_arrays:
         final_audio = np.concatenate(all_audio_arrays, axis=0)
         sf.write(out_path, final_audio, sample_rate)
@@ -253,7 +293,8 @@ async def api_generate_tts(
     api_key: str = Depends(verify_api_key) 
 ):
     cleanup_old_files()
-    if engine not in ["omnivoice", "cosyvoice"]: raise HTTPException(status_code=400, detail="Invalid Engine")
+    if engine not in ["omnivoice", "cosyvoice", "EdgeTTS (Fast CPU)"]: 
+        raise HTTPException(status_code=400, detail="Invalid Engine")
 
     job_id = str(uuid.uuid4())
     ref_audio_path = None
@@ -272,26 +313,22 @@ async def api_generate_tts(
 
 @app.post("/api/video/edit")
 async def api_video_edit(
-    # Accept either UploadFile OR Local Path string
     video_file: UploadFile = File(None),
     video_local_path: str = Form(""),
-    
     audio_file: UploadFile = File(None), 
     audio_local_path: str = Form(""),
-    
     trim_start: float = Form(0.0),
     trim_end: float = Form(0.0), 
     mute_original_audio: bool = Form(True), 
     short_video_format: bool = Form(True),  
     text_lines: str = Form(""),             
     watermark_text: str = Form(""),
-    return_local_path: bool = Form(False), # New option: return JSON path instead of file stream
+    return_local_path: bool = Form(False), 
     api_key: str = Depends(verify_api_key)
 ):
     cleanup_old_files()
     job_id = str(uuid.uuid4())
     
-    # 1. Resolve Video Path (Prioritize Local Path if provided)
     vid_path = None
     if video_local_path and os.path.exists(video_local_path):
         vid_path = video_local_path
@@ -302,7 +339,6 @@ async def api_video_edit(
     else:
         raise HTTPException(status_code=400, detail="Must provide either video_file or video_local_path")
         
-    # 2. Resolve Audio Path (Prioritize Local Path if provided)
     aud_path = None
     if audio_local_path and os.path.exists(audio_local_path):
         aud_path = audio_local_path
@@ -313,7 +349,6 @@ async def api_video_edit(
 
     out_vid_path = os.path.join(OUTPUT_DIR, f"{job_id}_output.mp4")
 
-    # 3. Render
     try:
         await process_video_edit(
             video_path=vid_path, 
@@ -332,12 +367,9 @@ async def api_video_edit(
     if not os.path.exists(out_vid_path):
         raise HTTPException(status_code=500, detail="Video was not generated.")
 
-    # 4. Return Strategy
     if return_local_path:
-        # Ideal for Same-Server Docker (n8n reads directly from path)
         return JSONResponse(content={"status": "success", "output_path": out_vid_path})
     
-    # Normal stream download
     return FileResponse(path=out_vid_path, media_type="video/mp4", filename="edited_video.mp4")
 
 
@@ -366,13 +398,18 @@ def gradio_video_edit(video_in, audio_in, trim_start, trim_end, mute_orig, force
 def gradio_tts(tts_mode, engine, custom_speaker, language, speed, text, instruct_prompt, ref_audio, current_logs):
     cleanup_old_files()
     if not text.strip(): return None, None, "❌", append_log(current_logs, "❌ ERROR: No text")
-    logs = append_log(current_logs, f"🚀 START: Model={custom_speaker}")
+    logs = append_log(current_logs, f"🚀 START: Engine={engine}, Model={custom_speaker}")
     yield None, None, "⏳ กำลังประมวลผล...", logs
-    time.sleep(2)
-    out_path = os.path.join(OUTPUT_DIR, f"dummy_{int(time.time())}.wav")
-    sf.write(out_path, np.zeros((44100, 1)), 44100) 
-    logs = append_log(logs, "✅ SUCCESS")
-    yield out_path, out_path, "✅ สำเร็จ", logs
+    
+    out_path = os.path.join(OUTPUT_DIR, f"gradio_tts_{int(time.time())}.wav")
+    
+    try:
+        asyncio.run(generate_tts_safely(engine, tts_mode, text, language, ref_audio, out_path, speed, custom_speaker))
+        logs = append_log(logs, "✅ SUCCESS: สร้างเสียงสำเร็จ")
+        yield out_path, out_path, "✅ สำเร็จ", logs
+    except Exception as e:
+        logs = append_log(logs, f"❌ ERROR: {str(e)}")
+        yield None, None, f"❌ {str(e)}", logs
 
 def update_sliders_from_preset(preset_name):
     if preset_name in STUDIO_PRESETS:
@@ -402,24 +439,39 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
     with gr.Row():
         with gr.Column(scale=3): 
             with gr.Tab("🎙️ 1. Audio Tools"):
-                gr.Markdown("*(ส่วนผลิตเสียงและมาสเตอร์ริ่งยังทำงานปกติ)*")
-                engine_dropdown = gr.Radio(choices=["CosyVoice 3.0"], value="CosyVoice 3.0", label="Engine")
-                text_input = gr.Textbox(label="Text Prompt", lines=2)
-                submit_btn = gr.Button("🚀 Generate Speech")
-                output_audio = gr.Audio(label="Output Audio", interactive=False)
+                gr.Markdown("*(สร้างเสียงพากย์ด้วย AI ทั้งแบบ GPU และ CPU ที่รวดเร็ว)*")
+                with gr.Row():
+                    with gr.Column():
+                        engine_dropdown = gr.Radio(choices=["CosyVoice 3.0", "OmniVoice", "EdgeTTS (Fast CPU)"], value="EdgeTTS (Fast CPU)", label="Engine")
+                        tts_mode = gr.Radio(choices=["Standard", "Instruct (Emotion)"], value="Standard", label="Mode")
+                        dynamic_speakers = get_available_speakers()
+                        speaker_dropdown = gr.Dropdown(choices=dynamic_speakers, value=dynamic_speakers[0], label="Speaker Model")
+                        lang_dropdown = gr.Dropdown(choices=["Thai (th)", "English (en)", "Chinese (zh)"], value="Thai (th)", label="Language")
+                        speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed")
+                        
+                        text_input = gr.Textbox(label="Text Prompt", lines=4)
+                        instruct_prompt = gr.Textbox(label="Instruction Prompt (Optional)")
+                        
+                        # Note: We keep ref_audio in case user chooses Zero-Shot on UI, even though standard UI hides it. We'll pass None or dummy.
+                        ref_audio_input = gr.Audio(label="Reference Audio", type="filepath", visible=False)
+                        
+                        submit_btn = gr.Button("🚀 Generate Speech", variant="primary")
+                    with gr.Column():
+                        status_output = gr.Markdown("🟢 พร้อมใช้งาน")
+                        output_audio = gr.Audio(label="Output Audio", interactive=False)
 
             with gr.Tab("📱 2. Social Media Video Automator"):
                 gr.Markdown("สร้างวิดีโอ 9:16 แนวตั้งอัตโนมัติ สำหรับ **Facebook Reels / TikTok / YouTube Shorts**")
                 
                 with gr.Row():
                     with gr.Column(scale=1):
-                        video_input = gr.Video(label="🎥 อัปโหลด Footage วิดีโอพื้นหลัง (แนวนอนหรือแนวตั้งก็ได้ ระบบจะตัดให้)", sources=["upload"])
-                        audio_input_video = gr.Audio(label="🎵 ไฟล์เสียงพากย์ / BGM (จะนำไปสวมแทนเสียงเดิมในวิดีโอ)", type="filepath")
+                        video_input = gr.Video(label="🎥 อัปโหลด Footage วิดีโอพื้นหลัง", sources=["upload"])
+                        audio_input_video = gr.Audio(label="🎵 ไฟล์เสียงพากย์ / BGM", type="filepath")
                         
                         gr.Markdown("### ⚙️ Video Settings")
                         with gr.Row():
-                            force_916 = gr.Checkbox(value=True, label="📱 บังคับอัตราส่วน 16:9 (แนวตั้ง Reels/Shorts)")
-                            mute_orig = gr.Checkbox(value=True, label="🔇 ลบเสียงดั้งเดิมของวิดีโอ (Mute Original Audio)")
+                            force_916 = gr.Checkbox(value=True, label="📱 บังคับอัตราส่วน 9:16 (แนวตั้ง)")
+                            mute_orig = gr.Checkbox(value=True, label="🔇 ลบเสียงดั้งเดิมของวิดีโอ")
                         
                         with gr.Row():
                             trim_start = gr.Number(value=0, label="ตัดหัว (เริ่มวินาทีที่)")
@@ -442,7 +494,11 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
             logs_display = gr.Textbox(label="Live Console", lines=30, interactive=False, value="[System] Initialized.")
             clear_log_btn = gr.Button("🗑️ Clear")
 
-    submit_btn.click(fn=gradio_tts, inputs=[engine_dropdown, engine_dropdown, engine_dropdown, engine_dropdown, engine_dropdown, text_input, text_input, output_audio, system_logs_state], outputs=[output_audio, output_audio, output_audio, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
+    submit_btn.click(
+        fn=gradio_tts, 
+        inputs=[tts_mode, engine_dropdown, speaker_dropdown, lang_dropdown, speed_slider, text_input, instruct_prompt, ref_audio_input, system_logs_state], 
+        outputs=[output_audio, output_audio, status_output, system_logs_state]
+    ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
     
     video_process_btn.click(
         fn=gradio_video_edit,

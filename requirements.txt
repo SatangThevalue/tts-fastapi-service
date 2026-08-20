@@ -10,3 +10,6 @@ httpx>=0.25.0
 numpy>=1.24.0
 moviepy==1.0.3
 Pillow>=9.0.0
+# New dependencies for CPU-friendly TTS and Thai language
+edge-tts==6.1.9
+PyThaiNLP>=4.0.0
