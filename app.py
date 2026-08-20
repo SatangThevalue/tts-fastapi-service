@@ -52,11 +52,9 @@ FONTS_DIR = os.path.join(BASE_DIR, "assets", "fonts")
 for d in [UPLOAD_DIR, OUTPUT_DIR, ASSETS_DIR, IR_DIR, SPEAKERS_DIR, PIPER_DIR, FONTS_DIR]:
     os.makedirs(d, exist_ok=True)
 
-# 🌟 AUTOMATED THAI FONT MANAGEMENT 🌟
 DEFAULT_THAI_FONT_PATH = os.path.join(FONTS_DIR, "Sarabun-Bold.ttf")
 
 def ensure_thai_font_exists():
-    """Check if the default Thai font exists, if not, download it from Google Fonts"""
     if not os.path.exists(DEFAULT_THAI_FONT_PATH):
         print("📥 [System] Thai font missing. Downloading Sarabun-Bold.ttf from Google Fonts...")
         font_url = "https://github.com/google/fonts/raw/main/ofl/sarabun/Sarabun-Bold.ttf"
@@ -66,7 +64,6 @@ def ensure_thai_font_exists():
         except Exception as e:
             print(f"❌ [System] Failed to download font: {e}")
 
-# Run the check on startup
 ensure_thai_font_exists()
 
 API_KEY_SECRET=os.environ.get("TTS_API_KEY", "") 
@@ -85,6 +82,9 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
 LLM_API_KEY=os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
 def get_available_speakers():
     speakers = ["Default Model"]
     if os.path.exists(SPEAKERS_DIR):
@@ -123,9 +123,6 @@ STUDIO_PRESETS = {
     "🗣️ Natural Human": {"bass": 1.0, "treble": 1.5, "comp": 1.5, "reverb": 0.08, "gate": False, "drive": 0.0, "pitch": 0, "delay": 0.0, "desc": "ธรรมชาติ ไม่บีบอัดมาก"}
 }
 
-# ==========================================
-# 1. Foley & Breath Insertion 
-# ==========================================
 def generate_synthetic_breath(duration_ms=400):
     samples = int((duration_ms / 1000.0) * 44100)
     noise = np.random.normal(0, 0.05, samples)
@@ -155,8 +152,7 @@ def insert_breaths(input_wav_path, output_wav_path):
             if breath_files:
                 b_file = random.choice(breath_files)
                 breath_snd = AudioSegment.from_file(b_file)
-                if len(breath_snd) > pause_duration:
-                    breath_snd = breath_snd[:pause_duration].fade_out(50)
+                if len(breath_snd) > pause_duration: breath_snd = breath_snd[:pause_duration].fade_out(50)
                 remaining_silence = pause_duration - len(breath_snd)
                 output_audio += breath_snd + AudioSegment.silent(duration=remaining_silence)
             else:
@@ -167,30 +163,33 @@ def insert_breaths(input_wav_path, output_wav_path):
             output_audio += audio[start:end]
             
         last_end = end
-        
     output_audio += audio[last_end:]
     output_audio.export(output_wav_path, format="wav")
 
 
 # ==========================================
-# 2. AI Audio Generation & Mastering
+# AUDIO GENERATION
 # ==========================================
 async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: str, ref_path: str, speed: float, speaker_model: str, piper_model: str):
     sample_rate = 44100
     
-    if engine == "EdgeTTS (Fast CPU / Online)":
+    if "edgetts" in engine.lower():
         voice = "th-TH-PremwadeeNeural" if "th" in lang.lower() else "en-US-AriaNeural"
         speed_percent = int((speed - 1.0) * 100)
         speed_str = f"+{speed_percent}%" if speed_percent >= 0 else f"{speed_percent}%"
         communicate = edge_tts.Communicate(text_chunk, voice, rate=speed_str)
         temp_mp3 = os.path.join(TEMP_DIR, f"edge_{uuid.uuid4().hex}.mp3")
         await communicate.save(temp_mp3)
-        audio_data, sr = sf.read(temp_mp3)
+        
+        def read_sf():
+            return sf.read(temp_mp3)
+        audio_data, sr = await asyncio.to_thread(read_sf)
+        
         os.remove(temp_mp3)
         if len(audio_data.shape) == 1: audio_data = audio_data.reshape(-1, 1)
         return audio_data, sr
         
-    elif engine == "PiperTTS (Fast CPU / Offline)":
+    elif "pipertts" in engine.lower():
         available_models = get_available_piper_models()
         if not piper_model or piper_model not in available_models or piper_model.startswith("(No Piper"):
             if available_models and not available_models[0].startswith("(No Piper"):
@@ -203,28 +202,26 @@ async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: s
             raise ValueError(f"Piper model not found at {model_path}")
             
         temp_wav = os.path.join(TEMP_DIR, f"piper_{uuid.uuid4().hex}.wav")
-        voice = PiperVoice.load(model_path)
         
         def run_piper():
+            voice = PiperVoice.load(model_path)
             with open(temp_wav, "wb") as wav_file:
                 voice.synthesize(text_chunk, wav_file, length_scale=1.0/speed)
+            return sf.read(temp_wav)
                 
-        await asyncio.to_thread(run_piper)
-        audio_data, sr = sf.read(temp_wav)
+        audio_data, sr = await asyncio.to_thread(run_piper)
         os.remove(temp_wav)
         if len(audio_data.shape) == 1: audio_data = audio_data.reshape(-1, 1)
         return audio_data, sr
         
     else:
+        # GPU Mock fallback
         available_speakers = get_available_speakers()
-        if not speaker_model or speaker_model not in available_speakers:
-            speaker_model = "Default Model"
-            
+        if not speaker_model or speaker_model not in available_speakers: speaker_model = "Default Model"
         await asyncio.sleep(1) 
         duration = max(1.0, len(text_chunk) * 0.1) 
         audio_data = np.zeros((int(sample_rate * duration), 1))
         return audio_data, sample_rate
-
 
 async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str, ref_path: str, out_path: str, speed: float = 1.0, speaker_model: str = "Default Model", piper_model: str = "", apply_breaths: bool = False):
     chunks = re.split(r'(?<=[.!?\n])\s+', full_text.strip())
@@ -233,7 +230,7 @@ async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str,
     all_audio_arrays = []
     sample_rate = 44100
     
-    if engine == "EdgeTTS (Fast CPU / Online)":
+    if "edgetts" in engine.lower():
         for chunk in chunks:
             if not chunk.strip(): continue
             audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, speaker_model, piper_model)
@@ -242,7 +239,7 @@ async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str,
             pause = np.zeros((int(sample_rate * 0.6), audio_data.shape[1] if len(audio_data.shape) > 1 else 1)) 
             all_audio_arrays.append(pause)
             
-    elif engine == "PiperTTS (Fast CPU / Offline)":
+    elif "pipertts" in engine.lower():
         async with piper_lock:
             for chunk in chunks:
                 if not chunk.strip(): continue
@@ -263,20 +260,23 @@ async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str,
                 all_audio_arrays.append(pause)
                 
     temp_concat_path = os.path.join(TEMP_DIR, f"pre_foley_{uuid.uuid4().hex}.wav")
-    if all_audio_arrays:
-        final_audio = np.concatenate(all_audio_arrays, axis=0)
-        sf.write(temp_concat_path, final_audio, sample_rate)
-    else:
-        sf.write(temp_concat_path, np.zeros((sample_rate, 1)), sample_rate)
+    
+    def write_concat():
+        if all_audio_arrays:
+            final_audio = np.concatenate(all_audio_arrays, axis=0)
+            sf.write(temp_concat_path, final_audio, sample_rate)
+        else:
+            sf.write(temp_concat_path, np.zeros((sample_rate, 1)), sample_rate)
+            
+    await asyncio.to_thread(write_concat)
 
     if apply_breaths:
-        insert_breaths(temp_concat_path, out_path)
+        await asyncio.to_thread(insert_breaths, temp_concat_path, out_path)
         os.remove(temp_concat_path)
     else:
         os.rename(temp_concat_path, out_path)
 
-
-def apply_studio_mastering(
+def _apply_studio_mastering_sync(
     input_path: str, output_path: str, gate: bool=True, bass: float=4.5, treble: float=3.0, 
     comp: float=3.0, reverb_amount: float=0.0, drive_amount: float=0.0, pitch_shift: int=0, 
     delay_time: float=0.0, humanize: bool=False, de_essing: bool=True, tape_saturation: bool=True, convolution_ir_path: str=None
@@ -319,93 +319,95 @@ def apply_studio_mastering(
     sf.write(output_path, effected_audio, sample_rate)
     return output_path
 
+async def apply_studio_mastering_async(*args, **kwargs):
+    return await asyncio.to_thread(_apply_studio_mastering_sync, *args, **kwargs)
 
 # ==========================================
-# 3. Video Operations
+# VIDEO EDITING
 # ==========================================
-async def process_video_edit(
+def _process_video_edit_sync(
     video_path: str, audio_path: str, output_path: str, trim_start: float = 0.0, trim_end: float = None, 
     mute_original_audio: bool = False, short_video_format: bool = True, add_watermark: str = "", text_lines: str = "" 
 ):
+    video = VideoFileClip(video_path)
+    if trim_end is None or trim_end <= 0: trim_end = video.duration
+    video = video.subclip(trim_start, trim_end)
+
+    if mute_original_audio: video = video.without_audio()
+
+    if short_video_format:
+        target_w, target_h = 1080, 1920
+        video_aspect = video.w / video.h
+        target_aspect = target_w / target_h
+        if video_aspect > target_aspect:
+            new_w = int(video.h * target_aspect)
+            x_center = video.w / 2
+            video = video.crop(x_center=x_center, width=new_w, height=video.h)
+        else:
+            new_h = int(video.w / target_aspect)
+            y_center = video.h / 2
+            video = video.crop(y_center=y_center, width=video.w, height=new_h)
+        video = video.resize(newsize=(target_w, target_h))
+
+    final_audio = None
+    if audio_path and os.path.exists(audio_path):
+        new_audio = AudioFileClip(audio_path)
+        new_audio = new_audio.set_duration(min(new_audio.duration, video.duration))
+        if mute_original_audio or video.audio is None:
+            final_audio = new_audio
+        else:
+            final_audio = CompositeAudioClip([video.audio.volumex(0.3), new_audio])
+            
+    if final_audio: video = video.set_audio(final_audio)
+
+    clips_to_composite = [video]
+    
+    font_arg = DEFAULT_THAI_FONT_PATH if os.path.exists(DEFAULT_THAI_FONT_PATH) else 'Arial'
+    
+    if text_lines and text_lines.strip():
+        lines = text_lines.split("\n")
+        lines = [l.strip() for l in lines if l.strip()]
+        try:
+            box_width = int(video.w * 0.85) 
+            start_y = int(video.h * 0.25)   
+            spacing = 30                    
+            current_y = start_y
+            for line in lines:
+                txt_clip = TextClip(
+                    line, fontsize=45, color='black', bg_color='white', 
+                    font=font_arg,  
+                    method='caption', align='center', size=(box_width, None)
+                )
+                txt_clip = txt_clip.set_position(('center', current_y)).set_duration(video.duration)
+                clips_to_composite.append(txt_clip)
+                current_y += txt_clip.h + spacing
+        except Exception as e: print(f"Warning: Text overlay failed: {e}")
+
+    if add_watermark and add_watermark.strip():
+        try:
+            wm_clip = TextClip(add_watermark, fontsize=40, color='white', bg_color='transparent', font=font_arg)
+            wm_clip = wm_clip.set_position(('right','bottom')).set_duration(video.duration).margin(bottom=50, right=50, opacity=0)
+            clips_to_composite.append(wm_clip)
+        except: pass
+
+    if len(clips_to_composite) > 1: video = CompositeVideoClip(clips_to_composite)
+
+    video.write_videofile(
+        output_path, codec="libx264", audio_codec="aac",
+        temp_audiofile=os.path.join(TEMP_DIR, f"temp-audio-{uuid.uuid4().hex[:6]}.m4a"),
+        remove_temp=True, fps=30, logger=None
+    )
+    
+    video.close()
+    if 'final_audio' in locals() and final_audio: final_audio.close()
+
+async def process_video_edit_async(*args, **kwargs):
     async with cpu_render_lock:
-        video = VideoFileClip(video_path)
-        if trim_end is None or trim_end <= 0: trim_end = video.duration
-        video = video.subclip(trim_start, trim_end)
-
-        if mute_original_audio: video = video.without_audio()
-
-        if short_video_format:
-            target_w, target_h = 1080, 1920
-            video_aspect = video.w / video.h
-            target_aspect = target_w / target_h
-            if video_aspect > target_aspect:
-                new_w = int(video.h * target_aspect)
-                x_center = video.w / 2
-                video = video.crop(x_center=x_center, width=new_w, height=video.h)
-            else:
-                new_h = int(video.w / target_aspect)
-                y_center = video.h / 2
-                video = video.crop(y_center=y_center, width=video.w, height=new_h)
-            video = video.resize(newsize=(target_w, target_h))
-
-        final_audio = None
-        if audio_path and os.path.exists(audio_path):
-            new_audio = AudioFileClip(audio_path)
-            new_audio = new_audio.set_duration(min(new_audio.duration, video.duration))
-            if mute_original_audio or video.audio is None:
-                final_audio = new_audio
-            else:
-                final_audio = CompositeAudioClip([video.audio.volumex(0.3), new_audio])
-                
-        if final_audio: video = video.set_audio(final_audio)
-
-        clips_to_composite = [video]
-        
-        # Determine font path to use
-        # If the downloaded font exists, we explicitly tell ImageMagick to use it.
-        font_arg = DEFAULT_THAI_FONT_PATH if os.path.exists(DEFAULT_THAI_FONT_PATH) else 'Arial'
-        
-        if text_lines and text_lines.strip():
-            lines = text_lines.split("\n")
-            lines = [l.strip() for l in lines if l.strip()]
-            try:
-                box_width = int(video.w * 0.85) 
-                start_y = int(video.h * 0.25)   
-                spacing = 30                    
-                current_y = start_y
-                for line in lines:
-                    # 🌟 FONT PATH INJECTION HERE 🌟
-                    txt_clip = TextClip(
-                        line, fontsize=45, color='black', bg_color='white', 
-                        font=font_arg,  
-                        method='caption', align='center', size=(box_width, None)
-                    )
-                    txt_clip = txt_clip.set_position(('center', current_y)).set_duration(video.duration)
-                    clips_to_composite.append(txt_clip)
-                    current_y += txt_clip.h + spacing
-            except Exception as e: print(f"Warning: Text overlay failed: {e}")
-
-        if add_watermark and add_watermark.strip():
-            try:
-                wm_clip = TextClip(add_watermark, fontsize=40, color='white', bg_color='transparent', font=font_arg)
-                wm_clip = wm_clip.set_position(('right','bottom')).set_duration(video.duration).margin(bottom=50, right=50, opacity=0)
-                clips_to_composite.append(wm_clip)
-            except: pass
-
-        if len(clips_to_composite) > 1: video = CompositeVideoClip(clips_to_composite)
-
-        video.write_videofile(
-            output_path, codec="libx264", audio_codec="aac",
-            temp_audiofile=os.path.join(TEMP_DIR, f"temp-audio-{uuid.uuid4().hex[:6]}.m4a"),
-            remove_temp=True, fps=30, logger=None
-        )
-        
-        video.close()
-        if 'final_audio' in locals() and final_audio: final_audio.close()
+        await asyncio.to_thread(_process_video_edit_sync, *args, **kwargs)
 
 
 # ==========================================
-# 4. FastAPI Setup
+# FastAPI Endpoints
 # ==========================================
 app = FastAPI(title="AI Media Studio API (Audio & Video)")
 mcp = FastMCP("Media_Studio_MCP")
@@ -461,7 +463,7 @@ async def api_generate_tts(
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
     if apply_humanize or apply_deessing or apply_tape_saturation or ir_path:
-        apply_studio_mastering(
+        await apply_studio_mastering_async(
             input_path=raw_output_path, output_path=final_output_path,
             de_essing=apply_deessing, tape_saturation=apply_tape_saturation, convolution_ir_path=ir_path, humanize=apply_humanize
         )
@@ -492,7 +494,7 @@ async def api_video_edit(
 
     out_vid_path = os.path.join(OUTPUT_DIR, f"{job_id}_output.mp4")
     try:
-        await process_video_edit(vid_path, aud_path, out_vid_path, trim_start, trim_end, mute_original_audio, short_video_format, watermark_text, text_lines)
+        await process_video_edit_async(vid_path, aud_path, out_vid_path, trim_start, trim_end, mute_original_audio, short_video_format, watermark_text, text_lines)
     except Exception as e: raise HTTPException(status_code=500, detail=f"Failed: {str(e)}")
 
     if return_local_path: return JSONResponse(content={"status": "success", "output_path": out_vid_path})
@@ -529,42 +531,47 @@ def delete_model_file(model_name, model_type, current_logs):
         return append_log(current_logs, f"🗑️ DELETED: {model_name}")
     else: return append_log(current_logs, f"❌ ERROR: File not found {model_name}")
 
-def gradio_tts(tts_mode, engine, custom_speaker, piper_model, language, speed, text, ref_audio, apply_breaths, current_logs):
+async def gradio_tts(tts_mode, engine, custom_speaker, piper_model, language, speed, text, ref_audio, apply_breaths, current_logs):
     cleanup_old_files()
-    if not text.strip(): return None, None, "❌", append_log(current_logs, "❌ ERROR: No text")
+    if not text.strip(): 
+        yield None, None, "❌", append_log(current_logs, "❌ ERROR: No text")
+        return
     logs = append_log(current_logs, f"🚀 START: Engine={engine}")
     yield None, None, "⏳ กำลังประมวลผล...", logs
     out_path = os.path.join(OUTPUT_DIR, f"gradio_tts_{int(time.time())}.wav")
     try:
-        asyncio.run(generate_tts_safely(engine, tts_mode, text, language, ref_audio, out_path, speed, custom_speaker, piper_model, apply_breaths))
+        await generate_tts_safely(engine, tts_mode, text, language, ref_audio, out_path, speed, custom_speaker, piper_model, apply_breaths)
         logs = append_log(logs, "✅ SUCCESS: สร้างเสียงสำเร็จ")
         yield out_path, out_path, "✅ สำเร็จ", logs
     except Exception as e:
         logs = append_log(logs, f"❌ ERROR: {str(e)}")
         yield None, None, f"❌ {str(e)}", logs
 
-def gradio_studio(input_audio, preset, humanize, de_essing, tape_sat, ir_file, export_format, enable_gate, bass, treble, comp, reverb, drive, pitch, delay, current_logs):
+async def gradio_studio(input_audio, preset, humanize, de_essing, tape_sat, ir_file, export_format, enable_gate, bass, treble, comp, reverb, drive, pitch, delay, current_logs):
     cleanup_old_files()
-    if not input_audio: return None, "❌", append_log(current_logs, "❌ No input")
+    if not input_audio: 
+        return None, "❌", append_log(current_logs, "❌ No input")
     try:
         logs = append_log(current_logs, f"⚙️ START STUDIO: {preset}")
         ext = export_format.lower()
         output_file = os.path.join(OUTPUT_DIR, f"studio_{int(time.time())}.{ext}")
         ir_path = ir_file.name if ir_file else None
-        apply_studio_mastering(input_audio, output_file, enable_gate, bass, treble, comp, reverb, drive, pitch, delay, humanize, de_essing, tape_sat, ir_path)
+        await apply_studio_mastering_async(input_audio, output_file, enable_gate, bass, treble, comp, reverb, drive, pitch, delay, humanize, de_essing, tape_sat, ir_path)
         logs = append_log(logs, f"✅ SUCCESS")
         return output_file, "✅ สำเร็จ", logs
     except Exception as e:
         return None, str(e), append_log(current_logs, f"❌ ERROR: {str(e)}")
 
-def gradio_video_edit(video_in, audio_in, trim_start, trim_end, mute_orig, force_916, text_lines, watermark, current_logs):
+async def gradio_video_edit(video_in, audio_in, trim_start, trim_end, mute_orig, force_916, text_lines, watermark, current_logs):
     cleanup_old_files()
-    if not video_in: return None, append_log(current_logs, "❌ ERROR: No video")
+    if not video_in: 
+        yield None, append_log(current_logs, "❌ ERROR: No video")
+        return
     logs = append_log(current_logs, "🎬 START VIDEO EDIT")
     yield None, logs
     out_vid_path = os.path.join(OUTPUT_DIR, f"{uuid.uuid4().hex}.mp4")
     try:
-        asyncio.run(process_video_edit(video_in, audio_in, out_vid_path, trim_start, trim_end if trim_end > 0 else None, mute_orig, force_916, watermark, text_lines))
+        await process_video_edit_async(video_in, audio_in, out_vid_path, trim_start, trim_end if trim_end > 0 else None, mute_orig, force_916, watermark, text_lines)
         logs = append_log(logs, "✅ SUCCESS")
         yield out_vid_path, logs
     except Exception as e:
@@ -593,18 +600,15 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
             with gr.Tab("🎙️ 1. Audio Tools & Foley"):
                 with gr.Row():
                     with gr.Column():
-                        # 🌟 CHANGED DEFAULT TO PIPER
                         engine_dropdown = gr.Radio(choices=["CosyVoice 3.0", "OmniVoice", "EdgeTTS (Fast CPU / Online)", "PiperTTS (Fast CPU / Offline)"], value="PiperTTS (Fast CPU / Offline)", label="Engine")
                         tts_mode = gr.Radio(choices=["Standard", "Instruct (Emotion)", "Zero-Shot (Voice Cloning)"], value="Standard", label="Mode")
                         
                         gpu_speaker_dropdown = gr.Dropdown(choices=get_available_speakers(), value=get_available_speakers()[0], label="GPU Model Checkpoint", visible=False)
-                        
-                        # 🌟 CHANGED DEFAULT TO BE VISIBLE SINCE PIPER IS DEFAULT
                         piper_speaker_dropdown = gr.Dropdown(choices=get_available_piper_models(), value=get_available_piper_models()[0], label="Piper Offline Model (.onnx)", visible=True)
                         
                         lang_dropdown = gr.Dropdown(choices=["Thai (th)", "English (en)"], value="Thai (th)", label="Language")
                         speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed")
-                        apply_breaths = gr.Checkbox(value=False, label="🫁 แทรกเสียงสูดลมหายใจอัตโนมัติ") # Turned off by default to keep simple
+                        apply_breaths = gr.Checkbox(value=False, label="🫁 แทรกเสียงสูดลมหายใจอัตโนมัติ") 
                         text_input = gr.Textbox(label="Text Prompt", lines=4)
                         ref_audio_input = gr.Audio(label="Reference Audio", type="filepath", visible=False)
                         submit_btn = gr.Button("🚀 Generate Speech", variant="primary")

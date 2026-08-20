@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  ai-media-studio:
+    build: .
+    container_name: ai-media-studio
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+    environment:
+      # Optional: Secure your API by setting a secret key
+      - TTS_API_KEY=
+      # Optional: Set LLM API Key for Auto-Emotion Tagging
+      - LLM_API_KEY=
+      - LLM_BASE_URL=https://api.openai.com/v1
+      - LLM_MODEL=gpt-4o-mini
+    volumes:
+      # Persist models and assets so they survive container restarts
+      - ./pretrained_models:/app/pretrained_models
+      - ./assets:/app/assets
+      # (Optional) Mount n8n media folder for blazing fast local rendering
+      # - /path/to/n8n/media:/app/temp/media_uploads
+    deploy:
+      # Enable GPU support (Uncomment if you have NVIDIA GPU and nvidia-container-toolkit installed)
+      # resources:
+      #   reservations:
+      #     devices:
+      #       - driver: nvidia
+      #         count: all
+      #         capabilities: [gpu]
