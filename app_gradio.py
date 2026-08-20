@@ -3,81 +3,97 @@ import time
 import os
 import soundfile as sf
 import tempfile
+import glob
 from datetime import datetime
 from pedalboard import Pedalboard, Compressor, HighpassFilter, LowShelfFilter, HighShelfFilter, NoiseGate, Limiter
 
 # ==========================================
-# ระบบ Logging (เก็บสถานะเพื่อให้ Gradio แสดงผล)
+# 0. ระบบจัดการไฟล์ (Auto-Cleanup)
 # ==========================================
-# เราจะสร้างฟังก์ชันสำหรับรับข้อความและแปลงเป็น format ที่มี Timestamp
+def cleanup_old_files():
+    """ลบไฟล์ใน temp ที่เก่ากว่า 1 ชั่วโมง ป้องกัน Disk เต็ม"""
+    temp_dir = tempfile.gettempdir()
+    now = time.time()
+    for f in glob.glob(os.path.join(temp_dir, "studio_processed_*.wav")) + glob.glob(os.path.join(temp_dir, "studio_processed_*.flac")):
+        if os.stat(f).st_mtime < now - 3600:
+            try:
+                os.remove(f)
+            except:
+                pass
+
+# ==========================================
+# ระบบ Logging
+# ==========================================
 def append_log(current_logs, new_message):
     timestamp = datetime.now().strftime("%H:%M:%S")
     log_entry = f"[{timestamp}] {new_message}"
-    
-    # หากยังไม่มี log เลย
     if not current_logs:
          return log_entry
-         
-    # หากมี log แล้ว ให้ต่อท้าย (จำกัดแค่ 15 บรรทัดล่าสุดกันหน้าเว็บยาวเกินไป)
     logs_list = current_logs.split("\n")
     logs_list.append(log_entry)
     if len(logs_list) > 15:
         logs_list = logs_list[-15:]
-        
     return "\n".join(logs_list)
-
 
 # ==========================================
 # 1. ฟังก์ชันส่วน TTS Generation
 # ==========================================
-def generate_tts(engine, language, text, ref_audio, current_logs):
+def generate_tts(tts_mode, engine, language, text, ref_audio, current_logs):
+    cleanup_old_files() # รันทำความสะอาดไฟล์ขยะทุกครั้งที่มีการกด Generate
+    
     if not text.strip():
-        logs = append_log(current_logs, f"❌ ERROR [TTS]: ข้อความว่างเปล่า ยกเลิกการประมวลผล")
+        logs = append_log(current_logs, f"❌ ERROR [TTS]: ข้อความว่างเปล่า")
         yield None, None, "❌ **เกิดข้อผิดพลาด:** กรุณาป้อนข้อความ", logs
         return
-    if not ref_audio:
-        logs = append_log(current_logs, f"❌ ERROR [TTS]: ไม่พบไฟล์เสียงต้นแบบ (Reference Audio)")
-        yield None, None, "❌ **เกิดข้อผิดพลาด:** กรุณาอัปโหลดเสียงต้นแบบ", logs
+        
+    if tts_mode == "Zero-Shot (Voice Cloning)" and not ref_audio:
+        logs = append_log(current_logs, f"❌ ERROR [TTS]: เลือกโหมดโคลนเสียง แต่ไม่พบไฟล์ Reference")
+        yield None, None, "❌ **เกิดข้อผิดพลาด:** โหมด Zero-Shot ต้องอัปโหลดเสียงต้นแบบ", logs
         return
 
-    logs = append_log(current_logs, f"🚀 START [TTS]: กำลังสั่งงาน {engine} (ภาษา: {language}) ข้อความ: '{text[:20]}...'")
-    yield None, None, f"⏳ **กำลังประมวลผล:** ดึงเนื้อเสียงของคุณผ่าน {engine} (ภาษา: {language})", logs
+    logs = append_log(current_logs, f"🚀 START [TTS]: Mode={tts_mode}, Engine={engine}, Lang={language}")
+    yield None, None, f"⏳ **กำลังประมวลผล:** เรียกใช้งาน {engine}...", logs
     
-    # จำลองระยะเวลาการรัน AI ของ GPU
-    logs = append_log(logs, f"⏳ INFO [TTS]: โมเดลกำลัง Extract เสียงพูดต้นฉบับ...")
-    yield None, None, f"⏳ **กำลังประมวลผล:** ดึงเนื้อเสียงของคุณผ่าน {engine} (ภาษา: {language})", logs
     time.sleep(1) 
     
-    logs = append_log(logs, f"⏳ INFO [TTS]: กำลัง Generate เสียงใหม่...")
-    yield None, None, f"⏳ **กำลังประมวลผล:** ดึงเนื้อเสียงของคุณผ่าน {engine} (ภาษา: {language})", logs
+    if tts_mode == "Zero-Shot (Voice Cloning)":
+        logs = append_log(logs, f"⏳ INFO [TTS]: กำลังดึงลักษณะเสียงจาก Reference Audio...")
+    else:
+        logs = append_log(logs, f"⏳ INFO [TTS]: กำลังโหลดเสียง Default ของภาษา {language}...")
+        
+    yield None, None, f"⏳ **กำลังประมวลผล:** สร้างเนื้อเสียง...", logs
     time.sleep(1)
     
     # [จุดที่ต้องแก้ไข] - โค้ดของจริงให้เรียกโมเดลมา Infer ตรงนี้
+    # สำหรับ Mock: ถ้ามี ref_audio คืนค่า ref_audio, ถ้าไม่มี (Standard Mode) คืนค่า Dummy
     output_audio_path = ref_audio 
+    if not output_audio_path:
+        # สร้างไฟล์ Dummy เมื่อไม่มี Ref
+        dummy_path = os.path.join(tempfile.gettempdir(), f"dummy_{int(time.time())}.wav")
+        import numpy as np
+        sf.write(dummy_path, np.zeros((44100, 1)), 44100) # 1 sec silence
+        output_audio_path = dummy_path
 
-    logs = append_log(logs, f"✅ SUCCESS [TTS]: สร้างเสียงเสร็จสิ้น ส่งต่อข้อมูลไปยังแท็บ Studio")
-    yield output_audio_path, output_audio_path, f"✅ **สำเร็จ:** ประมวลผลข้อความด้วย {engine} เสร็จสิ้น!", logs
-
+    logs = append_log(logs, f"✅ SUCCESS [TTS]: สร้างเสียงสำเร็จ")
+    yield output_audio_path, output_audio_path, f"✅ **สำเร็จ:** พร้อมนำไปปรับแต่งในแท็บ Studio!", logs
 
 # ==========================================
 # 2. ฟังก์ชันส่วน Studio Post-Processing
 # ==========================================
-def process_studio_audio(input_audio, enable_gate, bass_boost, treble_boost, compression_ratio, current_logs):
+def process_studio_audio(input_audio, export_format, enable_gate, bass_boost, treble_boost, compression_ratio, current_logs):
+    cleanup_old_files()
+    
     if not input_audio:
         logs = append_log(current_logs, f"❌ ERROR [STUDIO]: ไม่พบไฟล์เสียง Input")
-        return None, "❌ กรุณาอัปโหลดเสียง หรือสร้างเสียงจากแท็บแรกก่อน", logs
+        return None, "❌ กรุณาอัปโหลดเสียง", logs
 
     try:
-        logs = append_log(current_logs, f"⚙️ START [STUDIO]: เริ่มประมวลผล EQ และ Compressor (Bass={bass_boost}dB, Treble={treble_boost}dB, Comp={compression_ratio}:1)")
+        logs = append_log(current_logs, f"⚙️ START [STUDIO]: Mastering (Bass={bass_boost}dB, Comp={compression_ratio}:1, Format={export_format})")
         
-        # อ่านไฟล์เสียง
         audio_data, sample_rate = sf.read(input_audio)
         if len(audio_data.shape) > 1:
             audio_data = audio_data.T 
             
-        logs = append_log(logs, f"⚙️ INFO [STUDIO]: โหลดไฟล์เสียงสำเร็จ (Sample Rate: {sample_rate}Hz)")
-        
-        # สร้าง Chain ของ Effect
         board = Pedalboard([
             NoiseGate(threshold_db=-40.0, ratio=1.5, release_ms=250) if enable_gate else None,
             HighpassFilter(cutoff_frequency_hz=80),
@@ -88,19 +104,17 @@ def process_studio_audio(input_audio, enable_gate, bass_boost, treble_boost, com
         ])
         
         board = Pedalboard([effect for effect in board if effect is not None])
-
-        logs = append_log(logs, f"⚙️ INFO [STUDIO]: กำลังเขียน Effect ทับลงใน Audio Pipeline...")
         effected_audio = board(audio_data, sample_rate)
         
         if len(effected_audio.shape) > 1:
              effected_audio = effected_audio.T
 
-        temp_dir = tempfile.gettempdir()
-        output_file = os.path.join(temp_dir, f"studio_processed_{int(time.time())}.wav")
+        ext = export_format.lower()
+        output_file = os.path.join(tempfile.gettempdir(), f"studio_processed_{int(time.time())}.{ext}")
         sf.write(output_file, effected_audio, sample_rate)
 
-        logs = append_log(logs, f"✅ SUCCESS [STUDIO]: Mastering เสียงเสร็จสมบูรณ์")
-        return output_file, "✅ **สำเร็จ:** ประมวลผลเสียงแบบ Studio Podcast เรียบร้อยแล้ว!", logs
+        logs = append_log(logs, f"✅ SUCCESS [STUDIO]: บันทึกไฟล์เป็น {ext.upper()} สำเร็จ")
+        return output_file, f"✅ **สำเร็จ:** ไฟล์พร้อมใช้งาน ({export_format})", logs
 
     except Exception as e:
          error_msg = f"❌ ERROR [STUDIO]: {str(e)}"
@@ -111,31 +125,27 @@ def process_studio_audio(input_audio, enable_gate, bass_boost, treble_boost, com
 # 3. สร้าง UI หน้าเว็บด้วย Gradio Blocks
 # ==========================================
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
-    gr.Markdown(
-        """
-        # 🎙️ AI Voice & Studio Processor
-        ระบบสร้างเสียงพูด Zero-Shot แบบสมจริง และปรับแต่งเนื้อเสียงให้เป็น **Podcast Studio Quality**
-        """
-    )
-    
-    # ------------------- สร้างตัวแปรซ่อน (State) สำหรับเก็บประวัติ Logs -------------------
-    # State คือตัวแปรที่ Gradio จะจำค่าไว้ให้แต่ละ User (session) ไม่ทับกัน
+    gr.Markdown("# 🎙️ AI Voice & Studio Processor (Pro Edition)")
     system_logs_state = gr.State(value="")
     
     with gr.Row():
-        with gr.Column(scale=3): # พื้นที่หลัก 75%
-            
-            # ------------------- TAB 1: TTS Generation -------------------
+        with gr.Column(scale=3): 
             with gr.Tab("🎙️ 1. สร้างเสียง (TTS Generation)"):
                 with gr.Row():
                     with gr.Column(scale=1):
                         gr.Markdown("### ⚙️ 1. ตั้งค่าเสียง")
+                        # 🌟 เพิ่มระบบเลือกโหมด
+                        tts_mode = gr.Radio(
+                            choices=["Standard (Default Voice)", "Zero-Shot (Voice Cloning)"], 
+                            value="Zero-Shot (Voice Cloning)", 
+                            label="โหมดการทำงาน (TTS Mode)"
+                        )
                         with gr.Row():
                             engine_dropdown = gr.Radio(choices=["OmniVoice", "CosyVoice 3.0"], value="CosyVoice 3.0", label="TTS Engine")
                             lang_dropdown = gr.Dropdown(choices=["Thai (th)", "English (en)", "Chinese (zh)"], value="Thai (th)", label="ภาษาเป้าหมาย")
                         
                         text_input = gr.Textbox(label="ข้อความ (Text Prompt)", lines=4)
-                        ref_audio_input = gr.Audio(label="เสียงต้นแบบ (Reference Audio)", type="filepath", sources=["upload", "microphone"])
+                        ref_audio_input = gr.Audio(label="เสียงต้นแบบ (Reference Audio) - จำเป็นเฉพาะโหมด Zero-Shot", type="filepath", sources=["upload", "microphone"])
                         
                         submit_btn = gr.Button("🚀 สร้างเสียงพูด (Generate Speech)", variant="primary", size="lg")
                         
@@ -144,10 +154,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                         status_output = gr.Markdown("🟢 **สถานะ:** พร้อมใช้งาน (รอรับคำสั่ง)")
                         output_audio = gr.Audio(label="เสียงที่ถูกสร้างขึ้น (Raw Generated Audio)", interactive=False)
 
-            # ------------------- TAB 2: Studio Post-Processing -------------------
             with gr.Tab("🎛️ 2. ปรับแต่งเสียงสตูดิโอ (Studio Post-Processing)"):
-                gr.Markdown("เพิ่มความสมจริงระดับ Podcast (Proximity Effect & Compression) ให้เสียง AI ฟังดูแน่น มีน้ำหนัก")
-                
                 with gr.Row():
                     with gr.Column(scale=1):
                         gr.Markdown("### 🎚️ เครื่องมือปรับแต่ง (Studio Effects)")
@@ -158,6 +165,8 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                         compression_ratio = gr.Slider(minimum=1, maximum=8, value=3.0, step=0.5, label="ระดับความแน่น (Compression Ratio)")
                         enable_gate = gr.Checkbox(value=True, label="เปิดระบบตัดเสียงรบกวนรอบข้าง (Noise Gate)")
                         
+                        # 🌟 เพิ่มการเลือก Format
+                        export_format = gr.Radio(choices=["WAV", "FLAC"], value="WAV", label="รูปแบบไฟล์ขาออก (Export Format)")
                         process_btn = gr.Button("🎧 ประมวลผลเสียงระดับสตูดิโอ (Process)", variant="primary")
                     
                     with gr.Column(scale=1):
@@ -166,39 +175,25 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                         studio_audio_output = gr.Audio(label="เสียงที่ผ่านการปรับแต่งแล้ว (Studio Processed)", interactive=False)
 
         # ------------------- ด้านขวา: กรอบแสดง System Logs -------------------
-        with gr.Column(scale=1): # พื้นที่ 25% สำหรับแสดง Logs ตลอดเวลา
+        with gr.Column(scale=1): 
             gr.Markdown("### 💻 System Activity Logs")
-            gr.Markdown("แสดงสถานะการทำงานของเบื้องหลัง (Live)")
-            
-            # Textbox สำหรับแสดง Log (ไม่อนุญาตให้พิมพ์แก้)
-            logs_display = gr.Textbox(
-                label="Terminal Output", 
-                lines=20, 
-                interactive=False, 
-                value="[System] Initialized. Ready for actions.",
-                elem_id="terminal-log" # ตั้ง id ไว้ เผื่ออยากเอา CSS ไปตกแต่งเป็นสีดำตัวหนังสือเขียวทีหลังได้
-            )
-            
-            # ปุ่มสำหรับล้าง Log
+            logs_display = gr.Textbox(label="Terminal Output", lines=20, interactive=False, value="[System] Initialized.")
             clear_log_btn = gr.Button("🗑️ Clear Logs", size="sm")
 
     # ------------------- Event Listeners -------------------
-    # TAB 1: อัปเดต Logs พร้อมกับผลลัพธ์
     submit_btn.click(
         fn=generate_tts,
-        inputs=[engine_dropdown, lang_dropdown, text_input, ref_audio_input, system_logs_state],
+        inputs=[tts_mode, engine_dropdown, lang_dropdown, text_input, ref_audio_input, system_logs_state],
         outputs=[output_audio, raw_audio_input, status_output, system_logs_state]
     ).then(
-        # เมื่อทำงานเสร็จ ให้อัปเดต UI text block ด้วยค่า State ล่าสุด
         fn=lambda log_text: log_text,
         inputs=[system_logs_state],
         outputs=[logs_display]
     )
 
-    # TAB 2: อัปเดต Logs ของ Studio Process
     process_btn.click(
         fn=process_studio_audio,
-        inputs=[raw_audio_input, enable_gate, bass_boost, treble_boost, compression_ratio, system_logs_state],
+        inputs=[raw_audio_input, export_format, enable_gate, bass_boost, treble_boost, compression_ratio, system_logs_state],
         outputs=[studio_audio_output, studio_status, system_logs_state]
     ).then(
         fn=lambda log_text: log_text,
@@ -206,7 +201,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
         outputs=[logs_display]
     )
     
-    # ล้าง Log
     clear_log_btn.click(
         fn=lambda: ("", ""), 
         inputs=None, 
