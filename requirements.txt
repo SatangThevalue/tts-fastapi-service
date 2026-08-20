@@ -5,3 +5,4 @@ python-multipart==0.0.6
 gradio>=4.0.0
 pedalboard==0.9.8
 soundfile==0.12.1
+mcp>=0.1.0

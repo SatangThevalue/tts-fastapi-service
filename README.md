@@ -1,70 +1,60 @@
-# TTS Zero-Shot FastAPI Service for n8n
+# Unified AI Voice Engine (Gradio + FastAPI + MCP)
 
-This repository provides a FastAPI wrapper designed to expose zero-shot Text-to-Speech (TTS) capabilities for AI workflow automation tools like **n8n**. It is structured to act as an abstraction layer for integrating powerful TTS engines like **OmniVoice** and **CosyVoice 3.0**.
+This repository contains a **single-file application** (`app.py`) that acts as a comprehensive TTS (Text-to-Speech) hub for OmniVoice and CosyVoice 3.0. 
 
-## Features
-- **n8n Ready**: Accepts multipart/form-data for seamless audio file uploads from n8n HTTP Request nodes.
-- **Engine Routing**: Dynamically switch between `omnivoice` and `cosyvoice` engines via API parameters.
-- **Zero-Shot Voice Cloning**: Takes a short reference audio file and target text to clone voices on the fly.
-- **Commercial Friendly**: Both OmniVoice and CosyVoice 3.0 utilize the Apache 2.0 license.
+By running this one script, you instantly get:
+1.  **Gradio Web UI:** For interactive testing and visual studio-post processing.
+2.  **FastAPI Endpoints:** For seamless automation tool integration (like **n8n**).
+3.  **MCP Server (Model Context Protocol):** For allowing AI Agents (Cursor, Claude, etc.) to use your TTS tool natively.
+
+## Architecture & Workflow
+![Unified Architecture](https://img.shields.io/badge/Architecture-All%20in%20One-blue)
+
+- **Port `7860`** is used for everything.
+- **`/`**: Serves the Gradio Web UI.
+- **`/api/tts/generate`**: The raw FastAPI POST endpoint for n8n.
+- **`/sse`**: The Model Context Protocol (MCP) Server-Sent Events endpoint.
 
 ## Installation
 
-1. Clone the repository:
+1. Clone the repository.
+2. Create and activate a Python virtual environment.
+3. Install dependencies:
    ```bash
-   git clone <repository_url>
-   cd tts-fastapi-service
-   ```
-
-2. Create a virtual environment and install dependencies:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate
    pip install -r requirements.txt
    ```
 
-3. (Optional) Install the actual TTS engines:
-   * **OmniVoice**: Follow instructions at [k2-fsa/OmniVoice](https://github.com/k2-fsa/OmniVoice)
-   * **CosyVoice**: Follow instructions at [QwenAudio/CosyVoice](https://github.com/QwenAudio/CosyVoice)
-
-## Running the API
-
-Start the FastAPI server:
+## Running the Application
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+python app.py
 ```
+*(The server will start on `http://0.0.0.0:7860`)*
 
-## API Endpoints
+---
 
-### `GET /health`
-Check if the service is running.
+## 1. Using the Web UI (Gradio)
+Simply open `http://localhost:7860` in your browser. You can generate speech in standard or zero-shot mode, and then pass it to the "Studio Processing" tab to apply a Podcast-style mastering chain (EQ, Compressor, Noise Gate).
 
-### `POST /api/tts/zero-shot`
-Generate TTS audio using zero-shot cloning.
+---
 
-**Headers:**
-- `Content-Type: multipart/form-data`
+## 2. Using with n8n (FastAPI)
+Point your n8n **HTTP Request Node** to:
+- **URL**: `http://<your-ip>:7860/api/tts/generate`
+- **Method**: `POST`
+- **Body Content Type**: `Multipart-Form Data`
+- **Parameters**:
+  - `engine`: `omnivoice` or `cosyvoice`
+  - `text`: Your desired text
+  - `mode`: `standard` or `zeroshot`
+  - `apply_studio_effect`: `true` or `false`
+  - `reference_audio`: (File attachment, required if mode is zeroshot)
 
-**Body (Form-Data):**
-- `engine` (text): `omnivoice` or `cosyvoice`
-- `text` (text): The target text to be spoken.
-- `language` (text): Language code (e.g., `en`, `th`). Default is `en`.
-- `reference_audio` (file): A short `.wav` or `.mp3` file of the voice you want to clone.
+---
 
-**Returns:**
-- A binary audio file (`audio/wav`) that n8n can save or process further.
+## 3. Using with AI Agents (MCP)
+If you use a tool like Claude Desktop, Cursor, or any agent framework that supports MCP, you can connect them to this server.
+- The server exposes a tool named `generate_podcast_tts`.
+- Configure your agent's MCP settings to connect via SSE:
+  - **SSE Endpoint:** `http://localhost:7860/sse`
 
-## How to use in n8n
-
-1. Add an **HTTP Request** node.
-2. Set Method to **POST**.
-3. Set URL to `http://<your-api-ip>:8000/api/tts/zero-shot`.
-4. Set **Send Body** to `true`.
-5. Set **Body Content Type** to `Multipart-Form Data`.
-6. Add parameters:
-   - `engine` (String) = `omnivoice`
-   - `text` (String) = `Your text here`
-7. In the HTTP Request node, add an input binary field for the reference audio and map it to the parameter name `reference_audio`.
-
-## Note on Implementation
-The current `main.py` contains the routing, file-handling, and FastAPI structure. The `_mock_tts_generation` function is a placeholder that returns a silent 1-second WAV file. You must implement the actual Python inference code for OmniVoice/CosyVoice inside this function based on your local GPU/environment setup.
+The Agent can now autonomously call your local GPU-backed TTS engine whenever it needs to "speak" something!
