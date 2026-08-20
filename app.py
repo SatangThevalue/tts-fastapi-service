@@ -47,11 +47,29 @@ ASSETS_DIR = os.path.join(BASE_DIR, "assets", "foley")
 IR_DIR = os.path.join(BASE_DIR, "assets", "impulse_responses")           
 SPEAKERS_DIR = os.path.join(BASE_DIR, "pretrained_models", "speakers")   
 PIPER_DIR = os.path.join(BASE_DIR, "pretrained_models", "piper_voices")  
+FONTS_DIR = os.path.join(BASE_DIR, "assets", "fonts")
 
-for d in [UPLOAD_DIR, OUTPUT_DIR, ASSETS_DIR, IR_DIR, SPEAKERS_DIR, PIPER_DIR]:
+for d in [UPLOAD_DIR, OUTPUT_DIR, ASSETS_DIR, IR_DIR, SPEAKERS_DIR, PIPER_DIR, FONTS_DIR]:
     os.makedirs(d, exist_ok=True)
 
-API_KEY_SECRET=os.environ.get("API_KEY_SECRET", "") 
+# 🌟 AUTOMATED THAI FONT MANAGEMENT 🌟
+DEFAULT_THAI_FONT_PATH = os.path.join(FONTS_DIR, "Sarabun-Bold.ttf")
+
+def ensure_thai_font_exists():
+    """Check if the default Thai font exists, if not, download it from Google Fonts"""
+    if not os.path.exists(DEFAULT_THAI_FONT_PATH):
+        print("📥 [System] Thai font missing. Downloading Sarabun-Bold.ttf from Google Fonts...")
+        font_url = "https://github.com/google/fonts/raw/main/ofl/sarabun/Sarabun-Bold.ttf"
+        try:
+            urllib.request.urlretrieve(font_url, DEFAULT_THAI_FONT_PATH)
+            print(f"✅ [System] Font downloaded successfully to {DEFAULT_THAI_FONT_PATH}")
+        except Exception as e:
+            print(f"❌ [System] Failed to download font: {e}")
+
+# Run the check on startup
+ensure_thai_font_exists()
+
+API_KEY_SECRET=os.environ.get("TTS_API_KEY", "") 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def verify_api_key(api_key: str = Depends(api_key_header)):
@@ -342,6 +360,11 @@ async def process_video_edit(
         if final_audio: video = video.set_audio(final_audio)
 
         clips_to_composite = [video]
+        
+        # Determine font path to use
+        # If the downloaded font exists, we explicitly tell ImageMagick to use it.
+        font_arg = DEFAULT_THAI_FONT_PATH if os.path.exists(DEFAULT_THAI_FONT_PATH) else 'Arial'
+        
         if text_lines and text_lines.strip():
             lines = text_lines.split("\n")
             lines = [l.strip() for l in lines if l.strip()]
@@ -351,7 +374,12 @@ async def process_video_edit(
                 spacing = 30                    
                 current_y = start_y
                 for line in lines:
-                    txt_clip = TextClip(line, fontsize=45, color='black', bg_color='white', method='caption', align='center', size=(box_width, None))
+                    # 🌟 FONT PATH INJECTION HERE 🌟
+                    txt_clip = TextClip(
+                        line, fontsize=45, color='black', bg_color='white', 
+                        font=font_arg,  
+                        method='caption', align='center', size=(box_width, None)
+                    )
                     txt_clip = txt_clip.set_position(('center', current_y)).set_duration(video.duration)
                     clips_to_composite.append(txt_clip)
                     current_y += txt_clip.h + spacing
@@ -359,7 +387,7 @@ async def process_video_edit(
 
         if add_watermark and add_watermark.strip():
             try:
-                wm_clip = TextClip(add_watermark, fontsize=40, color='white', bg_color='transparent')
+                wm_clip = TextClip(add_watermark, fontsize=40, color='white', bg_color='transparent', font=font_arg)
                 wm_clip = wm_clip.set_position(('right','bottom')).set_duration(video.duration).margin(bottom=50, right=50, opacity=0)
                 clips_to_composite.append(wm_clip)
             except: pass
@@ -556,9 +584,6 @@ def toggle_engine_visibility(engine):
     is_gpu = engine in ["CosyVoice 3.0", "OmniVoice"]
     return gr.update(visible=is_gpu), gr.update(visible=is_piper)
 
-# ==========================================
-# Gradio UI Building
-# ==========================================
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
     gr.Markdown("# 🎬 AI Media Studio (Pro Edition)")
     system_logs_state = gr.State(value="")
@@ -633,6 +658,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                         studio_audio_output = gr.Audio(label="Mastered Audio", interactive=False)
 
             with gr.Tab("📱 4. Social Media Video Automator"):
+                gr.Markdown("📝 **Note:** การทำข้อความภาษาไทยบนวิดีโอต้องพึ่งพา Font ที่เซิร์ฟเวอร์ ระบบมีสคริปต์ดาวน์โหลดฟอนต์ Sarabun ให้อัตโนมัติแล้ว")
                 with gr.Row():
                     with gr.Column(scale=1):
                         video_input = gr.Video(label="🎥 Footage", sources=["upload"])
@@ -674,7 +700,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
         
     del_type.change(fn=update_del_dropdown, inputs=[del_type], outputs=[del_dropdown])
     del_btn.click(fn=delete_model_file, inputs=[del_dropdown, del_type, system_logs_state], outputs=[system_logs_state]).then(fn=refresh_speakers, outputs=[gpu_speaker_dropdown, piper_speaker_dropdown, del_dropdown, logs_display])
-
 
     preset_dropdown.change(fn=update_sliders_from_preset, inputs=[preset_dropdown], outputs=[preset_desc, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount])
     submit_btn.click(fn=gradio_tts, inputs=[tts_mode, engine_dropdown, gpu_speaker_dropdown, piper_speaker_dropdown, lang_dropdown, speed_slider, text_input, ref_audio_input, apply_breaths, system_logs_state], outputs=[output_audio, output_audio, status_output, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
