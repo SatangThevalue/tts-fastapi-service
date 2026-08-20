@@ -8,7 +8,7 @@ from datetime import datetime
 
 import soundfile as sf
 import numpy as np
-from pedalboard import Pedalboard, Compressor, HighpassFilter, LowShelfFilter, HighShelfFilter, NoiseGate, Limiter, Reverb, Chorus
+from pedalboard import Pedalboard, Compressor, HighpassFilter, LowShelfFilter, HighShelfFilter, NoiseGate, Limiter, Reverb, Chorus, Distortion, PitchShift, Delay
 
 # FastAPI & Gradio
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
@@ -48,28 +48,54 @@ def append_log(current_logs, new_message):
 
 
 # ==========================================
-# 1. Studio Presets Configuration
+# 1. 10 Advanced Studio Presets Configuration
 # ==========================================
+# โครงสร้าง: bass, treble, comp, reverb, gate, drive, pitch, delay
 STUDIO_PRESETS = {
+    # --- กลุ่มงาน Professional ---
     "🎙️ Podcast Studio (เสียงแน่น นุ่มลึก)": {
-        "bass": 5.0, "treble": 3.5, "comp": 3.5, "reverb": 0.05, "gate": True,
+        "bass": 5.0, "treble": 3.5, "comp": 3.5, "reverb": 0.05, "gate": True, "drive": 0.0, "pitch": 0, "delay": 0.0,
         "desc": "เพิ่มความทุ้มและบีบอัดเสียงให้ฟังสบาย เหมาะสำหรับรายการพอดแคสต์"
     },
-    "📖 Audiobook (บรรยายชัดเจน มีมิติ)": {
-        "bass": 2.0, "treble": 2.0, "comp": 2.5, "reverb": 0.15, "gate": True,
+    "📖 Audiobook Pro (บรรยายชัดเจน มีมิติ)": {
+        "bass": 2.0, "treble": 2.0, "comp": 2.5, "reverb": 0.15, "gate": True, "drive": 0.0, "pitch": 0, "delay": 0.0,
         "desc": "เสียงใสสะอาด มีมิติเสียงก้องนิดๆ ให้ความรู้สึกเหมือนกำลังเล่านิทานในห้อง"
     },
-    "📻 FM Radio (เสียงดีเจ วิทยุยุค 90)": {
-        "bass": 7.0, "treble": 5.0, "comp": 5.0, "reverb": 0.0, "gate": True,
-        "desc": "อัดเบสหนักๆ บีบอัดเสียงแน่นสุดๆ สไตล์ดีเจจัดรายการวิทยุ"
-    },
     "🗣️ Natural Human (เสียงคนพูดคุยปกติ)": {
-        "bass": 1.0, "treble": 1.5, "comp": 1.5, "reverb": 0.08, "gate": False,
+        "bass": 1.0, "treble": 1.5, "comp": 1.5, "reverb": 0.08, "gate": False, "drive": 0.0, "pitch": 0, "delay": 0.0,
         "desc": "ปรับแต่งน้อยที่สุด แค่เพิ่มความใสเล็กน้อย ไม่ตัดเสียงลมหายใจทิ้ง เพื่อความเป็นธรรมชาติ"
     },
-    "📞 Phone Call (จำลองเสียงโทรศัพท์)": {
-        "bass": -10.0, "treble": -5.0, "comp": 4.0, "reverb": 0.0, "gate": True,
-        "desc": "ตัดย่านเบสและแหลมทิ้ง จำลองเสียงอู้อี้ที่ผ่านสายโทรศัพท์"
+    "📣 Public Address (ประกาศผ่านเสียงตามสาย/สนามบิน)": {
+         "bass": -3.0, "treble": 5.0, "comp": 4.0, "reverb": 0.4, "gate": False, "drive": 5.0, "pitch": 0, "delay": 0.15,
+         "desc": "จำลองเสียงประกาศก้องๆ ในพื้นที่กว้าง มีเสียงสะท้อน (Delay/Reverb) และความแตกพร่าเล็กน้อย"
+    },
+    
+    # --- กลุ่มงาน Character & Creative ---
+    "📻 Vintage Radio (วิทยุ FM ยุค 90)": {
+        "bass": 7.0, "treble": 5.0, "comp": 6.0, "reverb": 0.0, "gate": True, "drive": 10.0, "pitch": 0, "delay": 0.0,
+        "desc": "อัดเบสหนัก บีบอัดเสียงแน่นสุดๆ และใส่ความ Saturation (Drive) ให้เสียงดูวินเทจสไตล์ดีเจยุคเก่า"
+    },
+    "📞 Old Telephone (โทรศัพท์บ้านแบบเก่า)": {
+        "bass": -15.0, "treble": -8.0, "comp": 5.0, "reverb": 0.0, "gate": True, "drive": 25.0, "pitch": 0, "delay": 0.0,
+        "desc": "ตัดย่านเบสและแหลมทิ้งแบบสุดโต่ง เพิ่มความแตก (Distortion) จำลองเสียงอู้อี้ผ่านสายโทรศัพท์"
+    },
+    "👺 Anonymous (เสียงพรางตัว/ผู้ไม่ประสงค์ออกนาม)": {
+        "bass": 2.0, "treble": -2.0, "comp": 3.0, "reverb": 0.1, "gate": True, "drive": 5.0, "pitch": -4, "delay": 0.0,
+        "desc": "กดคีย์เสียงให้ต่ำลง (Pitch Shift -4) ฟังดูทุ้ม ลึกลับ เหมือนในข่าวอาชญากรรม"
+    },
+    "👾 Cyberpunk AI (เสียงหุ่นยนต์/AI โลกอนาคต)": {
+        "bass": -2.0, "treble": 8.0, "comp": 4.0, "reverb": 0.2, "gate": True, "drive": 15.0, "pitch": 2, "delay": 0.05,
+        "desc": "เสียงแหลมใส บีบอัดให้กระด้าง แอบมีความแตกพร่าดิจิทัล (Drive) และเสียงก้องสะท้อนสั้นๆ"
+    },
+    
+    # --- กลุ่มงาน Special Environments ---
+    "🛁 Bathroom Echo (เสียงร้องเพลงในห้องน้ำ)": {
+        "bass": 3.0, "treble": 4.0, "comp": 2.0, "reverb": 0.8, "gate": False, "drive": 0.0, "pitch": 0, "delay": 0.0,
+        "desc": "เพิ่ม Reverb แบบจัดเต็ม (Wet Level 80%) จำลองเสียงสะท้อนกังวานในห้องน้ำกระเบื้อง"
+    },
+    "🏟️ Stadium Concert (เสียงกึกก้องในสนามกีฬา)": {
+        "bass": 4.0, "treble": 2.0, "comp": 3.0, "reverb": 0.7, "gate": False, "drive": 0.0, "pitch": 0, "delay": 0.3,
+        "desc": "เพิ่มเสียงสะท้อนแบบหน่วงเวลา (Delay 300ms) และ Reverb กว้างๆ เหมาะกับฉากบรรยายสเกลใหญ่"
     }
 }
 
@@ -89,6 +115,9 @@ def apply_studio_mastering(
     treble: float=3.0, 
     comp: float=3.0,
     reverb_amount: float=0.0,
+    drive_amount: float=0.0,   # ความแตกพร่า (Saturation/Distortion)
+    pitch_shift: int=0,        # การเปลี่ยนคีย์เสียง (Semitones)
+    delay_time: float=0.0,     # เสียงสะท้อน (Echo/Delay)
     humanize: bool=False
 ):
     audio_data, sample_rate = sf.read(input_path)
@@ -96,19 +125,29 @@ def apply_studio_mastering(
         audio_data = audio_data.T 
         
     board = Pedalboard([
-        NoiseGate(threshold_db=-40.0, ratio=1.5, release_ms=250) if gate else None,
+        # 1. Pitch Shifting (ทำเป็นอันดับแรก เพื่อไม่ให้กระทบ Reverb/Delay)
+        PitchShift(semitones=pitch_shift) if pitch_shift != 0 else None,
         
-        # Phone call preset logic: if bass is extremely low, apply tight bandpass
+        # 2. Noise Gate & EQ
+        NoiseGate(threshold_db=-40.0, ratio=1.5, release_ms=250) if gate else None,
         HighpassFilter(cutoff_frequency_hz=300 if bass <= -10 else 80),
         LowShelfFilter(cutoff_frequency_hz=120, gain_db=bass), 
         HighShelfFilter(cutoff_frequency_hz=6000, gain_db=treble), 
         
-        Compressor(threshold_db=-15, ratio=comp, attack_ms=2.0, release_ms=100),
-        Reverb(room_size=0.2, dry_level=1.0, wet_level=reverb_amount) if reverb_amount > 0 else None,
+        # 3. Saturation / Distortion (Tape warmth or Telephone crackle)
+        Distortion(drive_db=drive_amount) if drive_amount > 0 else None,
         
-        # Humanize Effect: add extremely subtle chorus/modulation to break AI "robotic perfection"
+        # 4. Compression (จับให้เสียงนิ่ง)
+        Compressor(threshold_db=-15, ratio=comp, attack_ms=2.0, release_ms=100),
+        
+        # 5. Spatial Effects (Delay & Reverb)
+        Delay(delay_seconds=delay_time, feedback=0.3, mix=0.4) if delay_time > 0 else None,
+        Reverb(room_size=0.3 if delay_time > 0 else 0.1, dry_level=1.0, wet_level=reverb_amount) if reverb_amount > 0 else None,
+        
+        # 6. Humanize Effect (Micro-modulation)
         Chorus(rate_hz=0.5, depth=0.05, mix=0.1) if humanize else None,
         
+        # 7. Safety Limiter
         Limiter(threshold_db=-1.0)
     ])
     
@@ -137,7 +176,7 @@ async def api_generate_tts(
     language: str = Form("en"),
     mode: str = Form("standard"),
     speed: float = Form(1.0),
-    preset: str = Form(None), # Accepts preset name from STUDIO_PRESETS
+    preset: str = Form(None), 
     apply_humanize: bool = Form(False),
     reference_audio: UploadFile = File(None)
 ):
@@ -163,7 +202,14 @@ async def api_generate_tts(
 
     if preset and preset in STUDIO_PRESETS:
         p = STUDIO_PRESETS[preset]
-        apply_studio_mastering(raw_output_path, final_output_path, p['gate'], p['bass'], p['treble'], p['comp'], p['reverb'], apply_humanize)
+        apply_studio_mastering(
+            input_path=raw_output_path, 
+            output_path=final_output_path, 
+            gate=p['gate'], bass=p['bass'], treble=p['treble'], 
+            comp=p['comp'], reverb_amount=p['reverb'], 
+            drive_amount=p['drive'], pitch_shift=p['pitch'], delay_time=p['delay'],
+            humanize=apply_humanize
+        )
         return FileResponse(path=final_output_path, media_type="audio/wav", filename=f"{engine}_studio.wav")
 
     return FileResponse(path=raw_output_path, media_type="audio/wav", filename=f"{engine}_raw.wav")
@@ -195,13 +241,22 @@ def gradio_tts(tts_mode, engine, language, speed, text, ref_audio, current_logs)
     yield output_audio, output_audio, "✅ สำเร็จ", logs
 
 def update_sliders_from_preset(preset_name):
-    """Callback to update slider values when a user selects a Preset"""
     if preset_name in STUDIO_PRESETS:
         p = STUDIO_PRESETS[preset_name]
-        return gr.update(value=p['desc']), gr.update(value=p['gate']), gr.update(value=p['bass']), gr.update(value=p['treble']), gr.update(value=p['comp']), gr.update(value=p['reverb'])
-    return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+        return (
+            gr.update(value=p['desc']), 
+            gr.update(value=p['gate']), 
+            gr.update(value=p['bass']), 
+            gr.update(value=p['treble']), 
+            gr.update(value=p['comp']), 
+            gr.update(value=p['reverb']),
+            gr.update(value=p['drive']),
+            gr.update(value=p['pitch']),
+            gr.update(value=p['delay'])
+        )
+    return [gr.update()] * 9
 
-def gradio_studio(input_audio, preset, humanize, export_format, enable_gate, bass, treble, comp, reverb, current_logs):
+def gradio_studio(input_audio, preset, humanize, export_format, enable_gate, bass, treble, comp, reverb, drive, pitch, delay, current_logs):
     cleanup_old_files()
     if not input_audio:
         return None, "❌ ไม่พบไฟล์", append_log(current_logs, "❌ ERROR: No input file")
@@ -210,7 +265,14 @@ def gradio_studio(input_audio, preset, humanize, export_format, enable_gate, bas
         ext = export_format.lower()
         output_file = os.path.join(OUTPUT_DIR, f"studio_{int(time.time())}.{ext}")
         
-        apply_studio_mastering(input_audio, output_file, enable_gate, bass, treble, comp, reverb, humanize)
+        apply_studio_mastering(
+            input_audio=input_audio, 
+            output_path=output_file, 
+            gate=enable_gate, bass=bass, treble=treble, 
+            comp=comp, reverb_amount=reverb, 
+            drive_amount=drive, pitch_shift=pitch, delay_time=delay,
+            humanize=humanize
+        )
         
         logs = append_log(logs, f"✅ SUCCESS: Exported as {ext.upper()}")
         return output_file, "✅ สำเร็จ", logs
@@ -243,28 +305,32 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                     with gr.Column():
                         raw_audio_input = gr.Audio(label="Input Audio", type="filepath")
                         
-                        # Added Feature: Presets Selection
-                        gr.Markdown("### 🎛️ เลือกสไตล์เสียงด่วน (Presets)")
+                        gr.Markdown("### 🎛️ เลือกสไตล์เสียง (10 Pro Presets)")
                         preset_dropdown = gr.Dropdown(
                             choices=list(STUDIO_PRESETS.keys()), 
                             value=list(STUDIO_PRESETS.keys())[0], 
-                            label="Preset สตูดิโอ"
+                            label="พรีเซ็ตสตูดิโอ (Studio Preset)"
                         )
                         preset_desc = gr.Markdown(f"*{STUDIO_PRESETS[list(STUDIO_PRESETS.keys())[0]]['desc']}*")
                         
-                        # Added Feature: Humanize AI Voice
                         humanize_checkbox = gr.Checkbox(
                             value=False, 
                             label="🤖 ➔ 🧑 Humanize (ลบความเพอร์เฟคของ AI)",
-                            info="เพิ่มคลื่นเสียงแทรกซ้อนบางๆ (Micro-Modulation) ให้เนื้อเสียงไม่นิ่งเป๊ะจนดูเป็นหุ่นยนต์"
+                            info="เพิ่มคลื่นเสียงแทรกซ้อน (Micro-Modulation) ให้เนื้อเสียงไม่นิ่งเป๊ะจนดูเป็นหุ่นยนต์"
                         )
                         
-                        with gr.Accordion("⚙️ ปรับแต่งแบบละเอียด (Manual EQ & Dynamics)", open=False):
-                            bass_boost = gr.Slider(minimum=-12, maximum=12, value=5.0, label="Bass (Proximity)")
-                            treble_boost = gr.Slider(minimum=-12, maximum=12, value=3.5, label="Treble (Air)")
-                            comp_ratio = gr.Slider(minimum=1, maximum=8, value=3.5, label="Compression")
-                            reverb_amount = gr.Slider(minimum=0.0, maximum=0.5, value=0.05, step=0.01, label="Room Reverb")
+                        with gr.Accordion("⚙️ ปรับแต่งแบบละเอียด (Advanced Manual Controls)", open=False):
+                            gr.Markdown("**Tone & Dynamics**")
+                            bass_boost = gr.Slider(minimum=-15, maximum=15, value=5.0, label="Bass (Proximity)")
+                            treble_boost = gr.Slider(minimum=-15, maximum=15, value=3.5, label="Treble (Air)")
+                            comp_ratio = gr.Slider(minimum=1, maximum=10, value=3.5, label="Compression")
                             enable_gate = gr.Checkbox(value=True, label="Noise Gate")
+                            
+                            gr.Markdown("**Special FX (Space & Modulation)**")
+                            reverb_amount = gr.Slider(minimum=0.0, maximum=1.0, value=0.05, step=0.01, label="Room Reverb (เสียงก้อง)")
+                            delay_amount = gr.Slider(minimum=0.0, maximum=1.0, value=0.0, step=0.05, label="Delay/Echo Time (เสียงสะท้อนหน่วงเวลา)")
+                            drive_amount = gr.Slider(minimum=0.0, maximum=30.0, value=0.0, step=1.0, label="Distortion/Drive (ความแตกพร่าวินเทจ)")
+                            pitch_shift = gr.Slider(minimum=-12, maximum=12, value=0, step=1, label="Pitch Shift (เปลี่ยนคีย์เสียง / Semitones)")
 
                         export_format = gr.Radio(choices=["WAV", "FLAC"], value="WAV", label="Format")
                         process_btn = gr.Button("🎧 ประมวลผลและทดสอบฟัง (Process & Listen)", variant="primary")
@@ -278,11 +344,10 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
             logs_display = gr.Textbox(label="Live Console", lines=20, interactive=False, value="[System] Initialized.")
             clear_log_btn = gr.Button("🗑️ Clear")
 
-    # Connect Preset Dropdown to Update Sliders
     preset_dropdown.change(
         fn=update_sliders_from_preset,
         inputs=[preset_dropdown],
-        outputs=[preset_desc, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount]
+        outputs=[preset_desc, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount]
     )
 
     submit_btn.click(
@@ -293,7 +358,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
 
     process_btn.click(
         fn=gradio_studio,
-        inputs=[raw_audio_input, preset_dropdown, humanize_checkbox, export_format, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, system_logs_state],
+        inputs=[raw_audio_input, preset_dropdown, humanize_checkbox, export_format, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount, system_logs_state],
         outputs=[studio_audio_output, studio_status, system_logs_state]
     ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
     
