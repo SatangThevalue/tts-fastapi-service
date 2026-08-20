@@ -9,6 +9,8 @@ import re
 import random
 from datetime import datetime
 import httpx
+import shutil
+import urllib.request
 
 import soundfile as sf
 import numpy as np
@@ -171,11 +173,16 @@ async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: s
         return audio_data, sr
         
     elif engine == "PiperTTS (Fast CPU / Offline)":
-        if not piper_model or piper_model.startswith("(No Piper"):
-            raise ValueError("No Piper .onnx model selected.")
+        available_models = get_available_piper_models()
+        if not piper_model or piper_model not in available_models or piper_model.startswith("(No Piper"):
+            if available_models and not available_models[0].startswith("(No Piper"):
+                piper_model = available_models[0]
+            else:
+                raise ValueError("No valid Piper .onnx model selected or found. Please ensure models exist in pretrained_models/piper_voices/.")
             
         model_path = os.path.join(PIPER_DIR, piper_model)
-        if not os.path.exists(model_path): raise ValueError(f"Piper model not found at {model_path}")
+        if not os.path.exists(model_path): 
+            raise ValueError(f"Piper model not found at {model_path}")
             
         temp_wav = os.path.join(TEMP_DIR, f"piper_{uuid.uuid4().hex}.wav")
         voice = PiperVoice.load(model_path)
@@ -191,6 +198,10 @@ async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: s
         return audio_data, sr
         
     else:
+        available_speakers = get_available_speakers()
+        if not speaker_model or speaker_model not in available_speakers:
+            speaker_model = "Default Model"
+            
         await asyncio.sleep(1) 
         duration = max(1.0, len(text_chunk) * 0.1) 
         audio_data = np.zeros((int(sample_rate * duration), 1))
@@ -439,7 +450,7 @@ async def api_video_edit(
     if not vid_path and video_file:
         vid_path = os.path.join(UPLOAD_DIR, f"{job_id}_vid.mp4")
         with open(vid_path, "wb") as f: f.write(await video_file.read())
-    if not vid_path: raise HTTPException(status_code=400, detail="Must provide video")
+    if not vid_path: raise HTTPException(status_code=400, detail="Must provide video_file or valid video_local_path")
         
     aud_path = audio_local_path if (audio_local_path and os.path.exists(audio_local_path)) else None
     if not aud_path and audio_file:
@@ -457,6 +468,34 @@ async def api_video_edit(
 # ==========================================
 # 5. Gradio UI Setup
 # ==========================================
+def upload_model_file(files, model_type, current_logs):
+    if not files: return append_log(current_logs, "❌ ERROR: No files uploaded.")
+    logs = current_logs
+    target_dir = PIPER_DIR if model_type == "Piper Offline Model (.onnx, .json)" else SPEAKERS_DIR
+    for file_obj in files:
+        filename = os.path.basename(file_obj.name)
+        if model_type == "Piper Offline Model (.onnx, .json)" and not (filename.endswith(".onnx") or filename.endswith(".json")):
+            logs = append_log(logs, f"⚠️ SKIPPED: {filename} (Piper requires .onnx or .json)")
+            continue
+        dest_path = os.path.join(target_dir, filename)
+        shutil.copy(file_obj.name, dest_path)
+        logs = append_log(logs, f"✅ UPLOADED: {filename} -> {os.path.basename(target_dir)}/")
+    return logs
+
+def delete_model_file(model_name, model_type, current_logs):
+    target_dir = PIPER_DIR if model_type == "Piper" else SPEAKERS_DIR
+    if not model_name or model_name.startswith("(No"):
+        return append_log(current_logs, "❌ ERROR: No valid model selected to delete.")
+    target_path = os.path.join(target_dir, model_name)
+    if os.path.exists(target_path):
+        if os.path.isdir(target_path): shutil.rmtree(target_path)
+        else: os.remove(target_path)
+        if target_path.endswith(".onnx"):
+            json_path = target_path + ".json"
+            if os.path.exists(json_path): os.remove(json_path)
+        return append_log(current_logs, f"🗑️ DELETED: {model_name}")
+    else: return append_log(current_logs, f"❌ ERROR: File not found {model_name}")
+
 def gradio_tts(tts_mode, engine, custom_speaker, piper_model, language, speed, text, ref_audio, apply_breaths, current_logs):
     cleanup_old_files()
     if not text.strip(): return None, None, "❌", append_log(current_logs, "❌ ERROR: No text")
@@ -537,7 +576,20 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                         status_output = gr.Markdown("🟢 พร้อมใช้งาน")
                         output_audio = gr.Audio(label="Output Audio", interactive=False)
 
-            with gr.Tab("🎛️ 2. Advanced Audio Mastering"):
+            with gr.Tab("🗄️ 2. Model Manager (จัดการไฟล์โมเดล)"):
+                gr.Markdown("### 📥 อัปโหลด หรือ ลบ โมเดลเสียง (Speaker Checkpoints / Piper ONNX)")
+                with gr.Row():
+                    with gr.Column():
+                        upload_type = gr.Radio(choices=["GPU Speaker Checkpoint (Cosy/Omni)", "Piper Offline Model (.onnx, .json)"], value="Piper Offline Model (.onnx, .json)", label="ประเภทโมเดลที่จะอัปโหลด")
+                        model_upload = gr.File(label="ลากไฟล์โมเดลมาวางที่นี่ (อัปโหลดได้หลายไฟล์พร้อมกัน)", file_count="multiple")
+                        upload_btn = gr.Button("📤 Upload to Server", variant="primary")
+                    with gr.Column():
+                        gr.Markdown("### 🗑️ ลบโมเดลออกจากระบบ")
+                        del_type = gr.Radio(choices=["GPU", "Piper"], value="Piper", label="ประเภทโมเดล")
+                        del_dropdown = gr.Dropdown(choices=get_available_piper_models(), label="เลือกโมเดลที่จะลบ")
+                        del_btn = gr.Button("🗑️ Delete Selected Model", variant="stop")
+                        
+            with gr.Tab("🎛️ 3. Advanced Audio Mastering"):
                 with gr.Row():
                     with gr.Column():
                         raw_audio_input = gr.Audio(label="Input Audio", type="filepath")
@@ -568,7 +620,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                         studio_status = gr.Markdown("🟢 รอรับไฟล์")
                         studio_audio_output = gr.Audio(label="Mastered Audio", interactive=False)
 
-            with gr.Tab("📱 3. Social Media Video Automator"):
+            with gr.Tab("📱 4. Social Media Video Automator"):
                 with gr.Row():
                     with gr.Column(scale=1):
                         video_input = gr.Video(label="🎥 Footage", sources=["upload"])
@@ -588,7 +640,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
         with gr.Column(scale=1): 
             gr.Markdown("### 💻 System Logs")
             logs_display = gr.Textbox(label="Live Console", lines=30, interactive=False, value="[System] Initialized.")
-            refresh_models_btn = gr.Button("🔄 Refresh Speaker Models", variant="secondary")
+            refresh_models_btn = gr.Button("🔄 Refresh Dropdowns", variant="secondary")
             clear_log_btn = gr.Button("🗑️ Clear")
 
     engine_dropdown.change(fn=toggle_engine_visibility, inputs=[engine_dropdown], outputs=[gpu_speaker_dropdown, piper_speaker_dropdown])
@@ -596,9 +648,19 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
     def refresh_speakers():
         gpu_list = get_available_speakers()
         piper_list = get_available_piper_models()
-        return gr.update(choices=gpu_list, value=gpu_list[0]), gr.update(choices=piper_list, value=piper_list[0]), "🔄 Refreshed models from disk."
+        return gr.update(choices=gpu_list, value=gpu_list[0]), gr.update(choices=piper_list, value=piper_list[0]), gr.update(choices=piper_list), "🔄 Refreshed models from disk."
 
-    refresh_models_btn.click(fn=refresh_speakers, inputs=None, outputs=[gpu_speaker_dropdown, piper_speaker_dropdown, logs_display])
+    refresh_models_btn.click(fn=refresh_speakers, inputs=None, outputs=[gpu_speaker_dropdown, piper_speaker_dropdown, del_dropdown, logs_display])
+    
+    upload_btn.click(fn=upload_model_file, inputs=[model_upload, upload_type, system_logs_state], outputs=[system_logs_state]).then(fn=refresh_speakers, outputs=[gpu_speaker_dropdown, piper_speaker_dropdown, del_dropdown, logs_display])
+    
+    def update_del_dropdown(dtype):
+        choices = get_available_piper_models() if dtype == "Piper" else get_available_speakers()
+        return gr.update(choices=choices, value=choices[0] if choices else None)
+        
+    del_type.change(fn=update_del_dropdown, inputs=[del_type], outputs=[del_dropdown])
+    del_btn.click(fn=delete_model_file, inputs=[del_dropdown, del_type, system_logs_state], outputs=[system_logs_state]).then(fn=refresh_speakers, outputs=[gpu_speaker_dropdown, piper_speaker_dropdown, del_dropdown, logs_display])
+
     preset_dropdown.change(fn=update_sliders_from_preset, inputs=[preset_dropdown], outputs=[preset_desc, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount])
     submit_btn.click(fn=gradio_tts, inputs=[tts_mode, engine_dropdown, gpu_speaker_dropdown, piper_speaker_dropdown, lang_dropdown, speed_slider, text_input, ref_audio_input, apply_breaths, system_logs_state], outputs=[output_audio, output_audio, status_output, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
     process_btn.click(fn=gradio_studio, inputs=[raw_audio_input, preset_dropdown, humanize_checkbox, de_essing_check, tape_sat_check, ir_file_input, export_format, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount, system_logs_state], outputs=[studio_audio_output, studio_status, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
