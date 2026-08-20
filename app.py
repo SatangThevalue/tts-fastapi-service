@@ -51,7 +51,7 @@ PIPER_DIR = os.path.join(BASE_DIR, "pretrained_models", "piper_voices")
 for d in [UPLOAD_DIR, OUTPUT_DIR, ASSETS_DIR, IR_DIR, SPEAKERS_DIR, PIPER_DIR]:
     os.makedirs(d, exist_ok=True)
 
-API_KEY_SECRET=os.environ.get("TTS_API_KEY", "") 
+API_KEY_SECRET=os.environ.get("API_KEY_SECRET", "") 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def verify_api_key(api_key: str = Depends(api_key_header)):
@@ -389,21 +389,26 @@ async def health_check():
 
 @app.post("/api/tts/generate")
 async def api_generate_tts(
-    engine: str = Form("EdgeTTS (Fast CPU / Online)"), 
+    engine: str = Form("PiperTTS (Fast CPU / Offline)"), 
     text: str = Form(""), 
-    language: str = Form("en"), 
+    language: str = Form("th"), 
     mode: str = Form("standard"),
     speaker_model: str = Form("Default Model"), 
     piper_model: str = Form(""), 
     speed: float = Form(1.0),
     apply_humanize: bool = Form(False), 
     apply_breaths: bool = Form(False),
-    apply_deessing: bool = Form(True), 
-    apply_tape_saturation: bool = Form(True),
+    apply_deessing: bool = Form(False), 
+    apply_tape_saturation: bool = Form(False),
     convolution_ir_file: UploadFile = File(None), 
     reference_audio: UploadFile = File(None), 
     api_key: str = Depends(verify_api_key) 
 ):
+    """
+    Generate Text-to-Speech audio.
+    By default, it uses PiperTTS and auto-selects the first available ONNX model.
+    It requires only the 'text' parameter to work perfectly out-of-the-box.
+    """
     cleanup_old_files()
     
     if not text or not text.strip():
@@ -432,9 +437,9 @@ async def api_generate_tts(
             input_path=raw_output_path, output_path=final_output_path,
             de_essing=apply_deessing, tape_saturation=apply_tape_saturation, convolution_ir_path=ir_path, humanize=apply_humanize
         )
-        return FileResponse(path=final_output_path, media_type="audio/wav", filename=f"{engine}_studio.wav")
+        return FileResponse(path=final_output_path, media_type="audio/wav", filename=f"tts_studio.wav")
 
-    return FileResponse(path=raw_output_path, media_type="audio/wav", filename=f"{engine}_raw.wav")
+    return FileResponse(path=raw_output_path, media_type="audio/wav", filename=f"tts_raw.wav")
 
 @app.post("/api/video/edit")
 async def api_video_edit(
@@ -466,15 +471,15 @@ async def api_video_edit(
     return FileResponse(path=out_vid_path, media_type="video/mp4", filename="edited_video.mp4")
 
 # ==========================================
-# 5. Gradio UI Setup
+# Gradio UI Handlers
 # ==========================================
 def upload_model_file(files, model_type, current_logs):
     if not files: return append_log(current_logs, "❌ ERROR: No files uploaded.")
     logs = current_logs
-    target_dir = PIPER_DIR if model_type == "Piper Offline Model (.onnx, .json)" else SPEAKERS_DIR
+    target_dir = PIPER_DIR if "Piper" in model_type else SPEAKERS_DIR
     for file_obj in files:
         filename = os.path.basename(file_obj.name)
-        if model_type == "Piper Offline Model (.onnx, .json)" and not (filename.endswith(".onnx") or filename.endswith(".json")):
+        if "Piper" in model_type and not (filename.endswith(".onnx") or filename.endswith(".json")):
             logs = append_log(logs, f"⚠️ SKIPPED: {filename} (Piper requires .onnx or .json)")
             continue
         dest_path = os.path.join(target_dir, filename)
@@ -551,23 +556,30 @@ def toggle_engine_visibility(engine):
     is_gpu = engine in ["CosyVoice 3.0", "OmniVoice"]
     return gr.update(visible=is_gpu), gr.update(visible=is_piper)
 
+# ==========================================
+# Gradio UI Building
+# ==========================================
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
     gr.Markdown("# 🎬 AI Media Studio (Pro Edition)")
     system_logs_state = gr.State(value="")
+    
     with gr.Row():
         with gr.Column(scale=3): 
             with gr.Tab("🎙️ 1. Audio Tools & Foley"):
                 with gr.Row():
                     with gr.Column():
-                        engine_dropdown = gr.Radio(choices=["CosyVoice 3.0", "OmniVoice", "EdgeTTS (Fast CPU / Online)", "PiperTTS (Fast CPU / Offline)"], value="EdgeTTS (Fast CPU / Online)", label="Engine")
+                        # 🌟 CHANGED DEFAULT TO PIPER
+                        engine_dropdown = gr.Radio(choices=["CosyVoice 3.0", "OmniVoice", "EdgeTTS (Fast CPU / Online)", "PiperTTS (Fast CPU / Offline)"], value="PiperTTS (Fast CPU / Offline)", label="Engine")
                         tts_mode = gr.Radio(choices=["Standard", "Instruct (Emotion)", "Zero-Shot (Voice Cloning)"], value="Standard", label="Mode")
                         
                         gpu_speaker_dropdown = gr.Dropdown(choices=get_available_speakers(), value=get_available_speakers()[0], label="GPU Model Checkpoint", visible=False)
-                        piper_speaker_dropdown = gr.Dropdown(choices=get_available_piper_models(), value=get_available_piper_models()[0], label="Piper Offline Model (.onnx)", visible=False)
+                        
+                        # 🌟 CHANGED DEFAULT TO BE VISIBLE SINCE PIPER IS DEFAULT
+                        piper_speaker_dropdown = gr.Dropdown(choices=get_available_piper_models(), value=get_available_piper_models()[0], label="Piper Offline Model (.onnx)", visible=True)
                         
                         lang_dropdown = gr.Dropdown(choices=["Thai (th)", "English (en)"], value="Thai (th)", label="Language")
                         speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed")
-                        apply_breaths = gr.Checkbox(value=True, label="🫁 แทรกเสียงสูดลมหายใจอัตโนมัติ")
+                        apply_breaths = gr.Checkbox(value=False, label="🫁 แทรกเสียงสูดลมหายใจอัตโนมัติ") # Turned off by default to keep simple
                         text_input = gr.Textbox(label="Text Prompt", lines=4)
                         ref_audio_input = gr.Audio(label="Reference Audio", type="filepath", visible=False)
                         submit_btn = gr.Button("🚀 Generate Speech", variant="primary")
@@ -643,6 +655,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
             refresh_models_btn = gr.Button("🔄 Refresh Dropdowns", variant="secondary")
             clear_log_btn = gr.Button("🗑️ Clear")
 
+    # --- UI Logic Wiring ---
     engine_dropdown.change(fn=toggle_engine_visibility, inputs=[engine_dropdown], outputs=[gpu_speaker_dropdown, piper_speaker_dropdown])
 
     def refresh_speakers():
@@ -652,6 +665,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
 
     refresh_models_btn.click(fn=refresh_speakers, inputs=None, outputs=[gpu_speaker_dropdown, piper_speaker_dropdown, del_dropdown, logs_display])
     
+    # Model Manager Wiring
     upload_btn.click(fn=upload_model_file, inputs=[model_upload, upload_type, system_logs_state], outputs=[system_logs_state]).then(fn=refresh_speakers, outputs=[gpu_speaker_dropdown, piper_speaker_dropdown, del_dropdown, logs_display])
     
     def update_del_dropdown(dtype):
@@ -660,6 +674,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
         
     del_type.change(fn=update_del_dropdown, inputs=[del_type], outputs=[del_dropdown])
     del_btn.click(fn=delete_model_file, inputs=[del_dropdown, del_type, system_logs_state], outputs=[system_logs_state]).then(fn=refresh_speakers, outputs=[gpu_speaker_dropdown, piper_speaker_dropdown, del_dropdown, logs_display])
+
 
     preset_dropdown.change(fn=update_sliders_from_preset, inputs=[preset_dropdown], outputs=[preset_desc, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount])
     submit_btn.click(fn=gradio_tts, inputs=[tts_mode, engine_dropdown, gpu_speaker_dropdown, piper_speaker_dropdown, lang_dropdown, speed_slider, text_input, ref_audio_input, apply_breaths, system_logs_state], outputs=[output_audio, output_audio, status_output, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
