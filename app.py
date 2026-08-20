@@ -392,19 +392,31 @@ def _process_video_edit_sync(
 
     if add_watermark and add_watermark.strip():
         try:
+            # Need to use pos=(...) instead of with_position in some contexts, but with_position is safer for v2
             wm_clip = TextClip(font=font_arg, text=add_watermark, font_size=40, color='white')
-            # Optional bg_color removal: bg_color='transparent' in v1 might be implied in v2.
-            wm_clip = wm_clip.with_position(('right','bottom')).with_duration(video.duration).margin(bottom=50, right=50, opacity=0)
+            # Simplifying watermark to prevent ImageMagick rendering freezes
+            wm_clip = wm_clip.with_position(('right','bottom')).with_duration(video.duration)
             clips_to_composite.append(wm_clip)
-        except: pass
+        except Exception as e: print(f"Warning: Watermark failed: {e}")
 
     if len(clips_to_composite) > 1: video = CompositeVideoClip(clips_to_composite)
 
-    video.write_videofile(
-        output_path, codec="libx264", audio_codec="aac",
-        temp_audiofile=os.path.join(TEMP_DIR, f"temp-audio-{uuid.uuid4().hex[:6]}.m4a"),
-        remove_temp=True, fps=30, logger=None
-    )
+    # Video rendering options configured for higher compatibility and speed
+    try:
+        video.write_videofile(
+            output_path, 
+            codec="libx264", 
+            audio_codec="aac",
+            temp_audiofile=os.path.join(TEMP_DIR, f"temp-audio-{uuid.uuid4().hex[:6]}.m4a"),
+            remove_temp=True, 
+            fps=25,          # Lower FPS to ensure faster CPU rendering
+            logger=None,
+            threads=2,       # Reduced threads to prevent deadlocks
+            preset="ultrafast" # Ultra fast encoding to prevent Timeout
+        )
+    except Exception as e:
+        print(f"Render Error: {e}")
+        raise e
     
     video.close()
     if 'final_audio' in locals() and final_audio: final_audio.close()
