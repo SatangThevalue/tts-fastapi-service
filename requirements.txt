@@ -8,17 +8,17 @@ python-multipart>=0.0.9
 gradio>=4.0.0
 mcp>=1.0.0
 
-# Audio & Post-Processing
-pedalboard>=0.9.8
+# Audio & Post-Processing (Pinned to avoid AVX2 illegal instruction on older Xeons)
+pedalboard==0.9.8
 soundfile>=0.12.1
 
 # HTTP & Math
 httpx>=0.25.0
 numpy>=1.24.0
 
-# Video Editing
-moviepy>=1.0.3
-Pillow>=9.0.0
+# Video Editing (Pinned to 1.x branch for stable editor.py module support)
+moviepy>=1.0.3,<2.0.0
+Pillow<10.0.0
 
 # CPU-based TTS & Text Processing
 edge-tts>=6.1.9
