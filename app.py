@@ -4,23 +4,22 @@ import glob
 import uuid
 import asyncio
 import tempfile
-import json
 from datetime import datetime
-import httpx  # For async LLM API calls
 
 import soundfile as sf
 import numpy as np
-from pedalboard import (Pedalboard, Compressor, HighpassFilter, 
-                        LowShelfFilter, HighShelfFilter, NoiseGate, 
-                        Limiter, Reverb, Chorus, Distortion, PitchShift, Delay)
+from pedalboard import Pedalboard, Compressor, HighpassFilter, LowShelfFilter, HighShelfFilter, NoiseGate, Limiter, Reverb, Chorus, Distortion, PitchShift, Delay
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import FileResponse
+# FastAPI & Gradio
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 import gradio as gr
+
+# MCP (Model Context Protocol)
 from mcp.server.fastmcp import FastMCP
 
 # ==========================================
-# 0. Configuration & Environment Variables
+# 0. Core Configuration & Directory Setup
 # ==========================================
 TEMP_DIR = tempfile.gettempdir()
 UPLOAD_DIR = os.path.join(TEMP_DIR, "tts_uploads")
@@ -28,14 +27,19 @@ OUTPUT_DIR = os.path.join(TEMP_DIR, "tts_outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# LLM Auto-Tagging Configuration
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
-LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+# 🌟 NEW: Speaker Models Directory (For Fine-tuned Weights)
+SPEAKERS_DIR = os.path.join(os.path.dirname(__file__), "pretrained_models", "speakers")
+os.makedirs(SPEAKERS_DIR, exist_ok=True)
 
-# ==========================================
-# 1. Cleanup & Logging
-# ==========================================
+def get_available_speakers():
+    """Auto-discover subdirectories in the speakers folder to list custom voices."""
+    speakers = ["Default Model"]
+    if os.path.exists(SPEAKERS_DIR):
+        for item in os.listdir(SPEAKERS_DIR):
+            if os.path.isdir(os.path.join(SPEAKERS_DIR, item)):
+                speakers.append(item)
+    return speakers
+
 def cleanup_old_files():
     now = time.time()
     for directory in [UPLOAD_DIR, OUTPUT_DIR]:
@@ -56,93 +60,24 @@ def append_log(current_logs, new_message):
     return "\n".join(logs_list)
 
 # ==========================================
-# 2. Studio Presets Configuration
+# 1. Studio Presets Configuration
 # ==========================================
 STUDIO_PRESETS = {
     "🎙️ Podcast Studio": {"bass": 5.0, "treble": 3.5, "comp": 3.5, "reverb": 0.05, "gate": True, "drive": 0.0, "pitch": 0, "delay": 0.0, "desc": "นุ่มลึก มีน้ำหนัก ฟังสบาย"},
     "📖 Audiobook Pro": {"bass": 2.0, "treble": 2.0, "comp": 2.5, "reverb": 0.15, "gate": True, "drive": 0.0, "pitch": 0, "delay": 0.0, "desc": "ใสสะอาด มีมิติเสียงก้องนิดๆ"},
-    "🗣️ Natural Human": {"bass": 1.0, "treble": 1.5, "comp": 1.5, "reverb": 0.08, "gate": False, "drive": 0.0, "pitch": 0, "delay": 0.0, "desc": "ธรรมชาติ ไม่บีบอัดมาก"},
-    "📻 Vintage Radio": {"bass": 7.0, "treble": 5.0, "comp": 6.0, "reverb": 0.0, "gate": True, "drive": 10.0, "pitch": 0, "delay": 0.0, "desc": "เบสหนัก ความบีบอัดแน่น และ Drive เล็กน้อยสไตล์ยุค 90"},
-    "📞 Old Telephone": {"bass": -15.0, "treble": -8.0, "comp": 5.0, "reverb": 0.0, "gate": True, "drive": 25.0, "pitch": 0, "delay": 0.0, "desc": "เสียงอู้อี้เหมือนคุยโทรศัพท์"},
-    "👺 Anonymous (Pitch Down)": {"bass": 2.0, "treble": -2.0, "comp": 3.0, "reverb": 0.1, "gate": True, "drive": 5.0, "pitch": -4, "delay": 0.0, "desc": "เสียงคีย์ต่ำ พรางตัว ลึกลับ"}
+    "🗣️ Natural Human": {"bass": 1.0, "treble": 1.5, "comp": 1.5, "reverb": 0.08, "gate": False, "drive": 0.0, "pitch": 0, "delay": 0.0, "desc": "ธรรมชาติ ไม่บีบอัดมาก"}
 }
 
 # ==========================================
-# 3. LLM Auto-Emotion Tagger (OpenAI Compatible)
+# 2. Core AI Generation & Mastering
 # ==========================================
-async def auto_tag_emotion_llm(text: str, engine: str, emotion: str) -> str:
-    """Use an LLM to smartly insert emotion tags or formatting based on the chosen engine."""
-    if not LLM_API_KEY:
-        raise ValueError("Please provide an LLM API Key in settings before using Auto-Tagging.")
-    
-    system_prompt = ""
-    if engine == "OmniVoice":
-        system_prompt = (
-            "You are an AI scriptwriter. Modify the user's text to fit the requested emotion by inserting OmniVoice non-verbal tags where appropriate. "
-            "Supported tags ONLY: [laughter], [sigh], [surprise-ah], [surprise-oh], [surprise-wa], [dissatisfaction-hnn]. "
-            "Insert them naturally in the text (e.g., at the beginning, pauses, or end). Do not change the original wording, only insert tags."
-        )
-    elif engine == "CosyVoice 3.0":
-        system_prompt = (
-            "You are an AI scriptwriter. Modify the user's text to express the requested emotion by adding a natural emotion tag at the beginning. "
-            "Format exactly like this: <|emotion|> Original Text. "
-            "Replace <|emotion|> with the requested emotion (e.g., <|happy|>, <|sad|>, <|angry|>, <|surprised|>, <|scared|>). "
-            "Do not alter the user's original text, just prepend the emotion tag."
-        )
-
-    headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Emotion requested: {emotion}\nText: {text}"}
-        ],
-        "temperature": 0.3
-    }
-    
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.post(f"{LLM_BASE_URL.rstrip('/')}/chat/completions", headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"].strip()
-
-def gradio_auto_tag(text, engine, emotion, current_logs, api_key, api_url, api_model):
-    """Gradio handler for LLM Tagging"""
-    if not text.strip():
-        return text, append_log(current_logs, "❌ ERROR: No text provided for auto-tagging.")
-    
-    # Temporarily set environment variables from UI inputs
-    global LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-    LLM_API_KEY = api_key
-    LLM_BASE_URL = api_url
-    LLM_MODEL = api_model
-
-    logs = append_log(current_logs, f"🤖 LLM Request: Analyzing emotion '{emotion}' via {api_model}...")
-    
-    try:
-        # Run async function synchronously for Gradio
-        tagged_text = asyncio.run(auto_tag_emotion_llm(text, engine, emotion))
-        logs = append_log(logs, f"✅ LLM Success: Auto-tagged text generated.")
-        return tagged_text, logs
-    except Exception as e:
-        logs = append_log(logs, f"❌ LLM Error: {str(e)}")
-        return text, logs
-
-# ==========================================
-# 4. Manual Tag Insertion Helpers
-# ==========================================
-def insert_tag_at_cursor(current_text, tag):
-    """Simple helper to append a tag to the end of the text. 
-    (In a real web app, Javascript is needed for exact cursor position, so we append for now)."""
-    return f"{current_text.rstrip()} {tag} "
-
-# ==========================================
-# 5. Core AI Generation & Mastering
-# ==========================================
-async def _mock_tts_generation(engine: str, mode: str, text: str, lang: str, ref_path: str, out_path: str, speed: float = 1.0, instruct_prompt: str = ""):
+async def _mock_tts_generation(engine: str, mode: str, text: str, lang: str, ref_path: str, out_path: str, speed: float = 1.0, custom_speaker: str = "Default Model"):
+    """
+    Mock function representing GPU inference.
+    In reality, if custom_speaker != "Default Model", the code will load 
+    the checkpoint from pretrained_models/speakers/{custom_speaker} 
+    and swap the voice before generating.
+    """
     await asyncio.sleep(2)
     sf.write(out_path, np.zeros((44100, 1)), 44100)
 
@@ -174,13 +109,56 @@ def apply_studio_mastering(
     return output_path
 
 # ==========================================
-# 6. Gradio Handlers
+# 3. FastAPI Setup (n8n endpoints)
 # ==========================================
-def gradio_tts(tts_mode, engine, language, speed, text, instruct_prompt, ref_audio, current_logs):
+app = FastAPI(title="TTS Unified API")
+mcp = FastMCP("TTS_Studio_MCP")
+app.mount("/sse", mcp.get_starlette_app())
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "healthy", "service": "TTS Unified App", "available_speakers": get_available_speakers()}
+
+@app.post("/api/tts/generate")
+async def api_generate_tts(
+    engine: str = Form(...),
+    text: str = Form(...),
+    language: str = Form("en"),
+    mode: str = Form("standard"),
+    speaker_model: str = Form("Default Model"), # 🌟 NEW: Select fine-tuned model via API
+    speed: float = Form(1.0),
+    apply_humanize: bool = Form(False),
+    reference_audio: UploadFile = File(None)
+):
+    cleanup_old_files()
+    job_id = str(uuid.uuid4())
+    ref_audio_path = None
+    if reference_audio:
+        ref_ext = reference_audio.filename.split('.')[-1] if '.' in reference_audio.filename else 'wav'
+        ref_audio_path = os.path.join(UPLOAD_DIR, f"{job_id}_ref.{ref_ext}")
+        with open(ref_audio_path, "wb") as f: f.write(await reference_audio.read())
+
+    raw_output_path = os.path.join(OUTPUT_DIR, f"{job_id}_raw.wav")
+    
+    try:
+        await _mock_tts_generation(engine, mode, text, language, ref_audio_path, raw_output_path, speed, speaker_model)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return FileResponse(path=raw_output_path, media_type="audio/wav", filename=f"{engine}_raw.wav")
+
+
+# ==========================================
+# 4. Gradio UI Setup
+# ==========================================
+def gradio_tts(tts_mode, engine, custom_speaker, language, speed, text, ref_audio, current_logs):
     cleanup_old_files()
     if not text.strip(): return None, None, "❌ เกิดข้อผิดพลาด", append_log(current_logs, "❌ ERROR: ข้อความว่างเปล่า")
 
-    logs = append_log(current_logs, f"🚀 START [TTS]: Engine={engine}, Instruct='{instruct_prompt[:15]}...'")
+    logs = append_log(current_logs, f"🚀 START: Model={custom_speaker}, Engine={engine}")
+    if custom_speaker != "Default Model":
+        logs = append_log(logs, f"🧠 INFO: Loading Fine-tuned weights for [{custom_speaker}]...")
+        
     yield None, None, "⏳ กำลังประมวลผล...", logs
     
     time.sleep(2)
@@ -190,14 +168,6 @@ def gradio_tts(tts_mode, engine, language, speed, text, instruct_prompt, ref_aud
     logs = append_log(logs, "✅ SUCCESS: สร้างเสียงสำเร็จ")
     yield output_audio, output_audio, "✅ สำเร็จ", logs
 
-def update_sliders_from_preset(preset_name):
-    if preset_name in STUDIO_PRESETS:
-        p = STUDIO_PRESETS[preset_name]
-        return (gr.update(value=p['desc']), gr.update(value=p['gate']), gr.update(value=p['bass']), 
-                gr.update(value=p['treble']), gr.update(value=p['comp']), gr.update(value=p['reverb']),
-                gr.update(value=p['drive']), gr.update(value=p['pitch']), gr.update(value=p['delay']))
-    return [gr.update()] * 9
-
 def gradio_studio(input_audio, preset, humanize, export_format, enable_gate, bass, treble, comp, reverb, drive, pitch, delay, current_logs):
     cleanup_old_files()
     if not input_audio: return None, "❌ ไม่พบไฟล์", append_log(current_logs, "❌ ERROR: No input file")
@@ -205,72 +175,37 @@ def gradio_studio(input_audio, preset, humanize, export_format, enable_gate, bas
         logs = append_log(current_logs, f"⚙️ START STUDIO: {preset}")
         ext = export_format.lower()
         output_file = os.path.join(OUTPUT_DIR, f"studio_{int(time.time())}.{ext}")
-        
         apply_studio_mastering(input_audio, output_file, enable_gate, bass, treble, comp, reverb, drive, pitch, delay, humanize)
         logs = append_log(logs, f"✅ SUCCESS: Exported as {ext.upper()}")
         return output_file, "✅ สำเร็จ", logs
     except Exception as e:
         return None, str(e), append_log(current_logs, f"❌ ERROR: {str(e)}")
 
-# ==========================================
-# 7. FastAPI & MCP Mount Setup
-# ==========================================
-app = FastAPI(title="TTS Unified API")
-mcp = FastMCP("TTS_Studio_MCP")
-app.mount("/sse", mcp.get_starlette_app())
-
-
-# ==========================================
-# 8. Gradio UI Assembly
-# ==========================================
+# Build Gradio Layout
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
     gr.Markdown("# 🎙️ Unified AI Voice Engine (Director's Edition)")
     system_logs_state = gr.State(value="")
     
     with gr.Row():
         with gr.Column(scale=3): 
-            with gr.Tab("🎙️ 1. TTS Generation & Emotion"):
+            with gr.Tab("🎙️ 1. TTS Generation (Fine-Tune Mode)"):
                 with gr.Row():
-                    # --- Left Column: Settings ---
                     with gr.Column():
                         engine_dropdown = gr.Radio(choices=["OmniVoice", "CosyVoice 3.0"], value="CosyVoice 3.0", label="Engine")
-                        tts_mode = gr.Radio(choices=["Standard", "Zero-Shot (Voice Cloning)", "Instruct (Emotion)"], value="Instruct (Emotion)", label="Mode")
+                        tts_mode = gr.Radio(choices=["Standard", "Zero-Shot (Voice Cloning)"], value="Standard", label="Mode")
                         
-                        with gr.Row():
-                            lang_dropdown = gr.Dropdown(choices=["Thai (th)", "English (en)", "Chinese (zh)"], value="Thai (th)", label="Language")
-                            speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed")
-
-                        # --- NEW: LLM Auto-Emotion Agent ---
-                        with gr.Accordion("🤖 LLM Auto-Emotion Agent", open=True):
-                            gr.Markdown("พิมพ์ข้อความ แล้วให้ LLM ช่วยวิเคราะห์และใส่ Emotion Tag ให้อัตโนมัติ")
-                            with gr.Row():
-                                llm_emotion_intent = gr.Dropdown(
-                                    choices=["ตื่นเต้น (Excited)", "เศร้า (Sad)", "โกรธ (Angry)", "หัวเราะ (Laughing)", "ตกใจ (Surprised)", "ทางการ (Formal)"],
-                                    value="ตื่นเต้น (Excited)", label="อารมณ์ที่ต้องการ"
-                                )
-                                llm_auto_tag_btn = gr.Button("✨ ให้ AI ใส่ Tag อารมณ์ให้", variant="secondary")
-                            
-                            with gr.Accordion("⚙️ LLM API Settings (OpenAI Compatible)", open=False):
-                                llm_api_url = gr.Textbox(label="API Base URL", value="https://api.openai.com/v1")
-                                llm_api_key = gr.Textbox(label="API Key", type="password")
-                                llm_api_model = gr.Textbox(label="Model", value="gpt-4o-mini")
-
-                        text_input = gr.Textbox(label="Text Prompt (ใส่ Tag ในนี้ได้เลย)", lines=4)
+                        # 🌟 NEW: Dynamic Speaker Selection
+                        gr.Markdown("### 🧠 เลือกเสียงโมเดล (Speaker Checkpoint)")
+                        dynamic_speakers = get_available_speakers()
+                        speaker_dropdown = gr.Dropdown(choices=dynamic_speakers, value=dynamic_speakers[0], label="เลือกไฟล์น้ำหนัก Fine-tune")
                         
-                        # --- NEW: Manual Action Tags (OmniVoice specific) ---
-                        gr.Markdown("*ปุ่มลัดแทรก Action Tags (สำหรับ OmniVoice)*")
-                        with gr.Row():
-                            tag_laugh_btn = gr.Button("😂 [laughter]", size="sm")
-                            tag_sigh_btn = gr.Button("😮‍💨 [sigh]", size="sm")
-                            tag_surprise_btn = gr.Button("😲 [surprise-ah]", size="sm")
-                            tag_angry_btn = gr.Button("😤 [dissatisfaction]", size="sm")
+                        lang_dropdown = gr.Dropdown(choices=["Thai (th)", "English (en)"], value="Thai (th)", label="Language")
+                        speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="Speed")
 
-                        instruct_prompt = gr.Textbox(label="Instruction Prompt (สำหรับโหมด Instruct)", placeholder="e.g. female, excited, fast pacing")
+                        text_input = gr.Textbox(label="Text Prompt", lines=4)
                         ref_audio_input = gr.Audio(label="Reference Audio", type="filepath")
-                        
                         submit_btn = gr.Button("🚀 Generate Speech", variant="primary")
                     
-                    # --- Right Column: Output ---
                     with gr.Column():
                         status_output = gr.Markdown("🟢 พร้อมใช้งาน")
                         output_audio = gr.Audio(label="Raw Audio", interactive=False)
@@ -279,23 +214,21 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                 with gr.Row():
                     with gr.Column():
                         raw_audio_input = gr.Audio(label="Input Audio", type="filepath")
-                        gr.Markdown("### 🎛️ เลือกสไตล์เสียง")
                         preset_dropdown = gr.Dropdown(choices=list(STUDIO_PRESETS.keys()), value=list(STUDIO_PRESETS.keys())[0], label="Studio Preset")
-                        preset_desc = gr.Markdown(f"*{STUDIO_PRESETS[list(STUDIO_PRESETS.keys())[0]]['desc']}*")
-                        humanize_checkbox = gr.Checkbox(value=False, label="🤖 ➔ 🧑 Humanize (ลดความเป็นหุ่นยนต์)")
+                        humanize_checkbox = gr.Checkbox(value=False, label="🤖 ➔ 🧑 Humanize")
                         
-                        with gr.Accordion("⚙️ ปรับแต่งแบบละเอียด (Manual EQ & FX)", open=False):
-                            bass_boost = gr.Slider(minimum=-15, maximum=15, value=5.0, label="Bass (Proximity)")
-                            treble_boost = gr.Slider(minimum=-15, maximum=15, value=3.5, label="Treble (Air)")
+                        with gr.Accordion("⚙️ ปรับแต่งแบบละเอียด", open=False):
+                            bass_boost = gr.Slider(minimum=-15, maximum=15, value=5.0, label="Bass")
+                            treble_boost = gr.Slider(minimum=-15, maximum=15, value=3.5, label="Treble")
                             comp_ratio = gr.Slider(minimum=1, maximum=10, value=3.5, label="Compression")
                             enable_gate = gr.Checkbox(value=True, label="Noise Gate")
-                            reverb_amount = gr.Slider(minimum=0.0, maximum=1.0, value=0.05, step=0.01, label="Room Reverb")
-                            delay_amount = gr.Slider(minimum=0.0, maximum=1.0, value=0.0, step=0.05, label="Delay/Echo")
-                            drive_amount = gr.Slider(minimum=0.0, maximum=30.0, value=0.0, step=1.0, label="Distortion/Drive")
-                            pitch_shift = gr.Slider(minimum=-12, maximum=12, value=0, step=1, label="Pitch Shift")
+                            reverb_amount = gr.Slider(minimum=0.0, maximum=1.0, value=0.05, label="Reverb")
+                            delay_amount = gr.Slider(minimum=0.0, maximum=1.0, value=0.0, label="Delay")
+                            drive_amount = gr.Slider(minimum=0.0, maximum=30.0, value=0.0, label="Distortion")
+                            pitch_shift = gr.Slider(minimum=-12, maximum=12, value=0, label="Pitch")
 
                         export_format = gr.Radio(choices=["WAV", "FLAC"], value="WAV", label="Format")
-                        process_btn = gr.Button("🎧 ประมวลผลและทดสอบฟัง", variant="primary")
+                        process_btn = gr.Button("🎧 ประมวลผล", variant="primary")
                         
                     with gr.Column():
                         studio_status = gr.Markdown("🟢 รอรับไฟล์")
@@ -304,34 +237,27 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
         with gr.Column(scale=1): 
             gr.Markdown("### 💻 System Logs")
             logs_display = gr.Textbox(label="Live Console", lines=30, interactive=False, value="[System] Initialized.")
+            
+            # 🌟 NEW: Refresh Models Button
+            refresh_models_btn = gr.Button("🔄 Refresh Speaker Models", variant="secondary")
+            
             clear_log_btn = gr.Button("🗑️ Clear")
 
     # --- Event Wiring ---
     
-    # 1. Manual Tags Buttons
-    tag_laugh_btn.click(fn=lambda t: insert_tag_at_cursor(t, "[laughter]"), inputs=[text_input], outputs=[text_input])
-    tag_sigh_btn.click(fn=lambda t: insert_tag_at_cursor(t, "[sigh]"), inputs=[text_input], outputs=[text_input])
-    tag_surprise_btn.click(fn=lambda t: insert_tag_at_cursor(t, "[surprise-ah]"), inputs=[text_input], outputs=[text_input])
-    tag_angry_btn.click(fn=lambda t: insert_tag_at_cursor(t, "[dissatisfaction-hnn]"), inputs=[text_input], outputs=[text_input])
+    def refresh_speakers():
+        new_list = get_available_speakers()
+        return gr.update(choices=new_list, value=new_list[0]), "🔄 Refreshed available models from disk."
 
-    # 2. LLM Auto Tagging
-    llm_auto_tag_btn.click(
-        fn=gradio_auto_tag,
-        inputs=[text_input, engine_dropdown, llm_emotion_intent, system_logs_state, llm_api_key, llm_api_url, llm_api_model],
-        outputs=[text_input, system_logs_state]
-    ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
-
-    # 3. Presets
-    preset_dropdown.change(
-        fn=update_sliders_from_preset,
-        inputs=[preset_dropdown],
-        outputs=[preset_desc, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount]
+    refresh_models_btn.click(
+        fn=refresh_speakers,
+        inputs=None,
+        outputs=[speaker_dropdown, logs_display]
     )
 
-    # 4. Generate & Process
     submit_btn.click(
         fn=gradio_tts,
-        inputs=[tts_mode, engine_dropdown, lang_dropdown, speed_slider, text_input, instruct_prompt, ref_audio_input, system_logs_state],
+        inputs=[tts_mode, engine_dropdown, speaker_dropdown, lang_dropdown, speed_slider, text_input, ref_audio_input, system_logs_state],
         outputs=[output_audio, raw_audio_input, status_output, system_logs_state]
     ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
 
