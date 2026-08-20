@@ -331,7 +331,7 @@ async def process_video_edit(
         if final_audio: video = video.set_audio(final_audio)
 
         clips_to_composite = [video]
-        if text_lines.strip():
+        if text_lines and text_lines.strip():
             lines = text_lines.split("\n")
             lines = [l.strip() for l in lines if l.strip()]
             try:
@@ -346,7 +346,7 @@ async def process_video_edit(
                     current_y += txt_clip.h + spacing
             except Exception as e: print(f"Warning: Text overlay failed: {e}")
 
-        if add_watermark:
+        if add_watermark and add_watermark.strip():
             try:
                 wm_clip = TextClip(add_watermark, fontsize=40, color='white', bg_color='transparent')
                 wm_clip = wm_clip.set_position(('right','bottom')).set_duration(video.duration).margin(bottom=50, right=50, opacity=0)
@@ -372,15 +372,32 @@ app = FastAPI(title="AI Media Studio API (Audio & Video)")
 mcp = FastMCP("Media_Studio_MCP")
 app.mount("/sse", mcp.get_starlette_app())
 
+@app.get("/api/health")
+async def health_check():
+    return {"status": "healthy", "service": "AI Media Studio App", "auth_required": bool(API_KEY_SECRET)}
+
 @app.post("/api/tts/generate")
 async def api_generate_tts(
-    engine: str = Form(...), text: str = Form(...), language: str = Form("en"), mode: str = Form("standard"),
-    speaker_model: str = Form("Default Model"), piper_model: str = Form(""), speed: float = Form(1.0),
-    apply_humanize: bool = Form(False), apply_breaths: bool = Form(False),
-    apply_deessing: bool = Form(True), apply_tape_saturation: bool = Form(True),
-    convolution_ir_file: UploadFile = File(None), reference_audio: UploadFile = File(None), api_key: str = Depends(verify_api_key) 
+    engine: str = Form("EdgeTTS (Fast CPU / Online)"), 
+    text: str = Form(""), 
+    language: str = Form("en"), 
+    mode: str = Form("standard"),
+    speaker_model: str = Form("Default Model"), 
+    piper_model: str = Form(""), 
+    speed: float = Form(1.0),
+    apply_humanize: bool = Form(False), 
+    apply_breaths: bool = Form(False),
+    apply_deessing: bool = Form(True), 
+    apply_tape_saturation: bool = Form(True),
+    convolution_ir_file: UploadFile = File(None), 
+    reference_audio: UploadFile = File(None), 
+    api_key: str = Depends(verify_api_key) 
 ):
     cleanup_old_files()
+    
+    if not text or not text.strip():
+        raise HTTPException(status_code=400, detail="Missing required 'text' parameter.")
+
     job_id = str(uuid.uuid4())
     ref_audio_path = None
     if reference_audio:
