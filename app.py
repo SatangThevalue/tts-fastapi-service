@@ -8,7 +8,7 @@ from datetime import datetime
 
 import soundfile as sf
 import numpy as np
-from pedalboard import Pedalboard, Compressor, HighpassFilter, LowShelfFilter, HighShelfFilter, NoiseGate, Limiter
+from pedalboard import Pedalboard, Compressor, HighpassFilter, LowShelfFilter, HighShelfFilter, NoiseGate, Limiter, Reverb
 
 # FastAPI & Gradio
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
@@ -50,16 +50,25 @@ def append_log(current_logs, new_message):
 # ==========================================
 # 1. AI Logic & Studio Processing
 # ==========================================
-async def _mock_tts_generation(engine: str, mode: str, text: str, lang: str, ref_path: str, out_path: str):
+async def _mock_tts_generation(engine: str, mode: str, text: str, lang: str, ref_path: str, out_path: str, speed: float = 1.0):
     """
     Mock function representing GPU inference.
     Replace with actual OmniVoice or CosyVoice code.
+    In reality, speed is passed to the TTS model during inference.
     """
     await asyncio.sleep(2) # Simulate GPU time
     # Create 1 second of silence as a dummy valid WAV file
     sf.write(out_path, np.zeros((44100, 1)), 44100)
 
-def apply_studio_mastering(input_path: str, output_path: str, gate: bool=True, bass: float=4.5, treble: float=3.0, comp: float=3.0):
+def apply_studio_mastering(
+    input_path: str, 
+    output_path: str, 
+    gate: bool=True, 
+    bass: float=4.5, 
+    treble: float=3.0, 
+    comp: float=3.0,
+    reverb_amount: float=0.0
+):
     audio_data, sample_rate = sf.read(input_path)
     if len(audio_data.shape) > 1:
         audio_data = audio_data.T 
@@ -70,6 +79,8 @@ def apply_studio_mastering(input_path: str, output_path: str, gate: bool=True, b
         LowShelfFilter(cutoff_frequency_hz=120, gain_db=bass), 
         HighShelfFilter(cutoff_frequency_hz=6000, gain_db=treble), 
         Compressor(threshold_db=-15, ratio=comp, attack_ms=2.0, release_ms=100),
+        # Add subtle room reverb if requested (great for audiobook feel)
+        Reverb(room_size=0.1, dry_level=1.0, wet_level=reverb_amount) if reverb_amount > 0 else None,
         Limiter(threshold_db=-1.0)
     ])
     
@@ -97,6 +108,7 @@ async def api_generate_tts(
     text: str = Form(...),
     language: str = Form("en"),
     mode: str = Form("standard"),
+    speed: float = Form(1.0), # Added missing speed parameter
     apply_studio_effect: bool = Form(False),
     reference_audio: UploadFile = File(None)
 ):
@@ -120,7 +132,7 @@ async def api_generate_tts(
     final_output_path = os.path.join(OUTPUT_DIR, f"{job_id}_final.wav")
 
     try:
-        await _mock_tts_generation(engine, mode, text, language, ref_audio_path, raw_output_path)
+        await _mock_tts_generation(engine, mode, text, language, ref_audio_path, raw_output_path, speed)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -133,12 +145,10 @@ async def api_generate_tts(
 # ==========================================
 # 3. MCP Server Setup (For AI Agents)
 # ==========================================
-# We wrap MCP tools inside a FastMCP instance. 
-# It handles SSE (Server-Sent Events) via an endpoint on the FastAPI app.
 mcp = FastMCP("TTS_Studio_MCP")
 
 @mcp.tool()
-async def generate_podcast_tts(text: str, engine: str = "cosyvoice", language: str = "th") -> str:
+async def generate_podcast_tts(text: str, engine: str = "cosyvoice", language: str = "th", speed: float = 1.0) -> str:
     """
     Generate high-quality podcast-style TTS audio from text. 
     Use this when a user asks to speak or convert text to voice.
@@ -150,14 +160,12 @@ async def generate_podcast_tts(text: str, engine: str = "cosyvoice", language: s
     final_path = os.path.join(OUTPUT_DIR, f"{job_id}_mcp_studio.wav")
     
     # 1. Generate Raw TTS
-    await _mock_tts_generation(engine, "standard", text, language, None, raw_path)
+    await _mock_tts_generation(engine, "standard", text, language, None, raw_path, speed)
     # 2. Apply Studio Effects for Podcast vibe
     apply_studio_mastering(raw_path, final_path)
     
     return f"Audio generated successfully at: {final_path}"
 
-# Mount the MCP Server to the FastAPI app via SSE endpoints
-# Agents will connect to http://localhost:7860/sse
 mcp_app = mcp.get_starlette_app()
 app.mount("/sse", mcp_app)
 
@@ -165,7 +173,7 @@ app.mount("/sse", mcp_app)
 # ==========================================
 # 4. Gradio UI Setup
 # ==========================================
-def gradio_tts(tts_mode, engine, language, text, ref_audio, current_logs):
+def gradio_tts(tts_mode, engine, language, speed, text, ref_audio, current_logs):
     cleanup_old_files()
     if not text.strip():
         logs = append_log(current_logs, "❌ ERROR: ข้อความว่างเปล่า")
@@ -176,7 +184,7 @@ def gradio_tts(tts_mode, engine, language, text, ref_audio, current_logs):
         yield None, None, "❌ เกิดข้อผิดพลาด", logs
         return
 
-    logs = append_log(current_logs, f"🚀 START: Mode={tts_mode}, Engine={engine}, Lang={language}")
+    logs = append_log(current_logs, f"🚀 START: Mode={tts_mode}, Engine={engine}, Lang={language}, Speed={speed}x")
     yield None, None, "⏳ กำลังประมวลผล...", logs
     
     # Generate Dummy audio synchronously for Gradio
@@ -190,7 +198,7 @@ def gradio_tts(tts_mode, engine, language, text, ref_audio, current_logs):
     logs = append_log(logs, "✅ SUCCESS: สร้างเสียงสำเร็จ")
     yield output_audio_path, output_audio_path, "✅ สำเร็จ", logs
 
-def gradio_studio(input_audio, export_format, enable_gate, bass, treble, comp, current_logs):
+def gradio_studio(input_audio, export_format, enable_gate, bass, treble, comp, reverb, current_logs):
     cleanup_old_files()
     if not input_audio:
         return None, "❌ ไม่พบไฟล์", append_log(current_logs, "❌ ERROR: No input file")
@@ -199,7 +207,7 @@ def gradio_studio(input_audio, export_format, enable_gate, bass, treble, comp, c
         ext = export_format.lower()
         output_file = os.path.join(OUTPUT_DIR, f"studio_{int(time.time())}.{ext}")
         
-        apply_studio_mastering(input_audio, output_file, enable_gate, bass, treble, comp)
+        apply_studio_mastering(input_audio, output_file, enable_gate, bass, treble, comp, reverb)
         
         logs = append_log(logs, f"✅ SUCCESS: Exported as {ext.upper()}")
         return output_file, "✅ สำเร็จ", logs
@@ -219,6 +227,10 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                         tts_mode = gr.Radio(choices=["Standard", "Zero-Shot (Voice Cloning)"], value="Zero-Shot (Voice Cloning)", label="Mode")
                         engine_dropdown = gr.Radio(choices=["OmniVoice", "CosyVoice 3.0"], value="CosyVoice 3.0", label="Engine")
                         lang_dropdown = gr.Dropdown(choices=["Thai (th)", "English (en)", "Chinese (zh)"], value="Thai (th)", label="Language")
+                        
+                        # Added missing feature: Speech Speed Control
+                        speed_slider = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.1, label="ความเร็วในการพูด (Speech Speed)")
+                        
                         text_input = gr.Textbox(label="Text Prompt", lines=4)
                         ref_audio_input = gr.Audio(label="Reference Audio", type="filepath")
                         submit_btn = gr.Button("🚀 Generate Speech", variant="primary")
@@ -233,6 +245,10 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
                         bass_boost = gr.Slider(minimum=0, maximum=12, value=4.5, label="Bass (Proximity)")
                         treble_boost = gr.Slider(minimum=0, maximum=12, value=3.0, label="Treble (Air)")
                         comp_ratio = gr.Slider(minimum=1, maximum=8, value=3.0, label="Compression")
+                        
+                        # Added missing feature: Subtle Room Reverb for audiobooks
+                        reverb_amount = gr.Slider(minimum=0.0, maximum=0.5, value=0.0, step=0.05, label="Room Reverb (Wet Level)", info="เพิ่มมิติให้เสียงก้องเหมือนอยู่ในห้องเล็กๆ (เหมาะกับ Audiobook)")
+                        
                         enable_gate = gr.Checkbox(value=True, label="Noise Gate")
                         export_format = gr.Radio(choices=["WAV", "FLAC"], value="WAV", label="Format")
                         process_btn = gr.Button("🎧 Process Studio Audio", variant="primary")
@@ -247,13 +263,13 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
 
     submit_btn.click(
         fn=gradio_tts,
-        inputs=[tts_mode, engine_dropdown, lang_dropdown, text_input, ref_audio_input, system_logs_state],
+        inputs=[tts_mode, engine_dropdown, lang_dropdown, speed_slider, text_input, ref_audio_input, system_logs_state],
         outputs=[output_audio, raw_audio_input, status_output, system_logs_state]
     ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
 
     process_btn.click(
         fn=gradio_studio,
-        inputs=[raw_audio_input, export_format, enable_gate, bass_boost, treble_boost, comp_ratio, system_logs_state],
+        inputs=[raw_audio_input, export_format, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, system_logs_state],
         outputs=[studio_audio_output, studio_status, system_logs_state]
     ).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
     
@@ -261,12 +277,10 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
 
 
 # ==========================================
-# 5. Application Mount (The Magic Trick)
+# 5. Application Mount
 # ==========================================
-# Mount Gradio onto the existing FastAPI app at the root ("/") path.
 app = gr.mount_gradio_app(app, demo, path="/")
 
 if __name__ == "__main__":
     import uvicorn
-    # This single run command spins up FastAPI, Gradio UI, and MCP SSE server on port 7860!
     uvicorn.run(app, host="0.0.0.0", port=7860)
