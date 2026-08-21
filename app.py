@@ -491,12 +491,16 @@ def _process_video_edit_sync(
                 safe_line = multiline_text.replace(":", "\\:").replace("'", "'\\\\''")
                 
                 safe_font = font_arg.replace("\\", "/") 
+                # Optimization for 16:9 vertical (1080x1920) reels: 
+                # - fontsize=60 makes it readable on mobile
+                # - text_align is not supported in older FFmpeg, so we use a different centering approach or default to left-aligned inside the centered box
+                # - We use a semi-transparent dark background for contrast
                 draw_filter = (
                     f"drawtext=fontfile='{safe_font}':text='{safe_line}':"
-                    f"fontcolor=white:fontsize=45:"
-                    f"box=1:boxcolor=black@0.6:boxborderw=10:"
-                    f"x=(w-text_w)/2:y={start_y_expr}:"
-                    f"line_spacing=20:text_align=C"
+                    f"fontcolor=white:fontsize=60:"
+                    f"box=1:boxcolor=black@0.65:boxborderw=15:"
+                    f"x=(w-text_w)/2:y=(h-text_h)/2:" # True Center of the screen
+                    f"line_spacing=25"
                 )
                 vf_filters.append(draw_filter)
                     
