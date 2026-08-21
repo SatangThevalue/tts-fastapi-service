@@ -483,23 +483,22 @@ def _process_video_edit_sync(
                 # Base Y position (25% from top)
                 start_y_expr = "(h*0.25)"
                 
-                for i, line in enumerate(lines):
-                    # Escape special characters for ffmpeg filter
-                    safe_line = line.replace(":", "\\:").replace("'", "'\\\\''")
-                    # Calculate Y position dynamically for each line (spacing = 80px)
-                    y_expr = f"{start_y_expr} + ({i}*80)"
-                    
-                    # White text, black shadow/box for readability
-                    # Escaping fontfile correctly for FFmpeg: 
-                    # If font_arg contains standard paths like /app/assets/fonts/Sarabun-Bold.ttf it should work
-                    safe_font = font_arg.replace("\\", "/") 
-                    draw_filter = (
-                        f"drawtext=fontfile='{safe_font}':text='{safe_line}':"
-                        f"fontcolor=white:fontsize=45:"
-                        f"box=1:boxcolor=black@0.6:boxborderw=10:"
-                        f"x=(w-text_w)/2:y={y_expr}"
-                    )
-                    vf_filters.append(draw_filter)
+                # In order to support multiline text block naturally and centered
+                # We can construct a single drawtext filter with text parameter containing newlines
+                # However, FFmpeg text parameter newlines can be tricky.
+                # Alternative: join lines with \n
+                multiline_text = "\\n".join(lines)
+                safe_line = multiline_text.replace(":", "\\:").replace("'", "'\\\\''")
+                
+                safe_font = font_arg.replace("\\", "/") 
+                draw_filter = (
+                    f"drawtext=fontfile='{safe_font}':text='{safe_line}':"
+                    f"fontcolor=white:fontsize=45:"
+                    f"box=1:boxcolor=black@0.6:boxborderw=10:"
+                    f"x=(w-text_w)/2:y={start_y_expr}:"
+                    f"line_spacing=20:text_align=C"
+                )
+                vf_filters.append(draw_filter)
                     
             if add_watermark and add_watermark.strip():
                 safe_wm = add_watermark.replace(":", "\\:").replace("'", "'\\\\''")
