@@ -402,7 +402,8 @@ async def apply_studio_mastering_async(*args, **kwargs):
 # ==========================================
 def _process_video_edit_sync(
     video_path: str, audio_path: str, output_path: str, trim_start: float = 0.0, trim_end: float = None, 
-    mute_original_audio: bool = False, short_video_format: bool = True, add_watermark: str = "", text_lines: str = "" 
+    mute_original_audio: bool = False, short_video_format: bool = True, add_watermark: str = "", text_lines: str = "",
+    font_size: int = 60, text_y_position: str = "center", box_opacity: float = 0.65
 ):
     video = VideoFileClip(video_path)
     if trim_end is None or trim_end <= 0: trim_end = video.duration
@@ -491,15 +492,19 @@ def _process_video_edit_sync(
                 safe_line = multiline_text.replace(":", "\\:").replace("'", "'\\\\''")
                 
                 safe_font = font_arg.replace("\\", "/") 
-                # Optimization for 16:9 vertical (1080x1920) reels: 
-                # - fontsize=60 makes it readable on mobile
-                # - text_align is not supported in older FFmpeg, so we use a different centering approach or default to left-aligned inside the centered box
-                # - We use a semi-transparent dark background for contrast
+                # Y position handling
+                if text_y_position == "top":
+                    y_expr = "(h*0.15)"
+                elif text_y_position == "bottom":
+                    y_expr = "(h*0.75)"
+                else: # center
+                    y_expr = "(h-text_h)/2"
+                    
                 draw_filter = (
                     f"drawtext=fontfile='{safe_font}':text='{safe_line}':"
-                    f"fontcolor=white:fontsize=60:"
-                    f"box=1:boxcolor=black@0.65:boxborderw=15:"
-                    f"x=(w-text_w)/2:y=(h-text_h)/2:" # True Center of the screen
+                    f"fontcolor=white:fontsize={font_size}:"
+                    f"box=1:boxcolor=black@{box_opacity}:boxborderw=15:"
+                    f"x=(w-text_w)/2:y={y_expr}:"
                     f"line_spacing=25"
                 )
                 vf_filters.append(draw_filter)
@@ -641,6 +646,7 @@ async def api_video_edit(
     audio_file: UploadFile = File(None), audio_local_path: str = Form(""),
     trim_start: float = Form(0.0), trim_end: float = Form(0.0), mute_original_audio: bool = Form(True), 
     short_video_format: bool = Form(True), text_lines: str = Form(""), watermark_text: str = Form(""),
+    font_size: int = Form(60), text_y_position: str = Form("center"), box_opacity: float = Form(0.65),
     return_local_path: bool = Form(False), api_key: str = Depends(verify_api_key)
 ):
     cleanup_old_files()
@@ -658,7 +664,7 @@ async def api_video_edit(
 
     out_vid_path = os.path.join(OUTPUT_DIR, f"{job_id}_output.mp4")
     try:
-        await process_video_edit_async(vid_path, aud_path, out_vid_path, trim_start, trim_end, mute_original_audio, short_video_format, watermark_text, text_lines)
+        await process_video_edit_async(vid_path, aud_path, out_vid_path, trim_start, trim_end, mute_original_audio, short_video_format, watermark_text, text_lines, font_size, text_y_position, box_opacity)
     except Exception as e: raise HTTPException(status_code=500, detail=f"Failed: {str(e)}")
 
     if return_local_path: return JSONResponse(content={"status": "success", "output_path": out_vid_path})
@@ -726,7 +732,7 @@ async def gradio_studio(input_audio, preset, humanize, de_essing, tape_sat, ir_f
     except Exception as e:
         return None, str(e), append_log(current_logs, f"❌ ERROR: {str(e)}")
 
-async def gradio_video_edit(video_in, audio_in, trim_start, trim_end, mute_orig, force_916, text_lines, watermark, current_logs):
+async def gradio_video_edit(video_in, audio_in, trim_start, trim_end, mute_orig, force_916, text_lines, watermark, font_size, text_y_position, box_opacity, current_logs):
     cleanup_old_files()
     if not video_in: 
         yield None, append_log(current_logs, "❌ ERROR: No video")
@@ -735,7 +741,7 @@ async def gradio_video_edit(video_in, audio_in, trim_start, trim_end, mute_orig,
     yield None, logs
     out_vid_path = os.path.join(OUTPUT_DIR, f"{uuid.uuid4().hex}.mp4")
     try:
-        await process_video_edit_async(video_in, audio_in, out_vid_path, trim_start, trim_end if trim_end > 0 else None, mute_orig, force_916, watermark, text_lines)
+        await process_video_edit_async(video_in, audio_in, out_vid_path, trim_start, trim_end if trim_end > 0 else None, mute_orig, force_916, watermark, text_lines, font_size, text_y_position, box_opacity)
         logs = append_log(logs, "✅ SUCCESS")
         yield out_vid_path, logs
     except Exception as e:
@@ -837,6 +843,10 @@ with gr.Blocks() as demo:
                         with gr.Row():
                             trim_start = gr.Number(value=0, label="ตัดหัว")
                             trim_end = gr.Number(value=0, label="ตัดท้าย (0=ไม่ตัด)")
+                        with gr.Accordion("⚙️ ปรับแต่งข้อความ", open=False):
+                            font_size = gr.Slider(minimum=20, maximum=120, value=60, step=1, label="ขนาดตัวหนังสือ (Font Size)")
+                            text_y_position = gr.Radio(choices=["top", "center", "bottom"], value="center", label="ตำแหน่งบรรทัด (Y Position)")
+                            box_opacity = gr.Slider(minimum=0.0, maximum=1.0, value=0.65, step=0.05, label="ความทึบของกล่องดำ (Box Opacity)")
                         text_lines = gr.Textbox(label="ข้อความ (บรรทัดละกล่อง)", lines=4)
                         watermark_text = gr.Textbox(label="ลายน้ำ")
                         video_process_btn = gr.Button("🎬 Render Video", variant="primary")
@@ -859,7 +869,6 @@ with gr.Blocks() as demo:
 
     refresh_models_btn.click(fn=refresh_speakers, inputs=None, outputs=[gpu_speaker_dropdown, piper_speaker_dropdown, del_dropdown, logs_display])
     
-    # Model Manager Wiring
     upload_btn.click(fn=upload_model_file, inputs=[model_upload, upload_type, system_logs_state], outputs=[system_logs_state]).then(fn=refresh_speakers, outputs=[gpu_speaker_dropdown, piper_speaker_dropdown, del_dropdown, logs_display])
     
     def update_del_dropdown(dtype):
@@ -872,7 +881,7 @@ with gr.Blocks() as demo:
     preset_dropdown.change(fn=update_sliders_from_preset, inputs=[preset_dropdown], outputs=[preset_desc, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount])
     submit_btn.click(fn=gradio_tts, inputs=[tts_mode, engine_dropdown, gpu_speaker_dropdown, piper_speaker_dropdown, lang_dropdown, speed_slider, text_input, ref_audio_input, apply_breaths, system_logs_state], outputs=[output_audio, output_audio, status_output, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
     process_btn.click(fn=gradio_studio, inputs=[raw_audio_input, preset_dropdown, humanize_checkbox, de_essing_check, tape_sat_check, ir_file_input, export_format, enable_gate, bass_boost, treble_boost, comp_ratio, reverb_amount, drive_amount, pitch_shift, delay_amount, system_logs_state], outputs=[studio_audio_output, studio_status, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
-    video_process_btn.click(fn=gradio_video_edit, inputs=[video_input, audio_input_video, trim_start, trim_end, mute_orig, force_916, text_lines, watermark_text, system_logs_state], outputs=[video_output, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
+    video_process_btn.click(fn=gradio_video_edit, inputs=[video_input, audio_input_video, trim_start, trim_end, mute_orig, force_916, text_lines, watermark_text, font_size, text_y_position, box_opacity, system_logs_state], outputs=[video_output, system_logs_state]).then(fn=lambda log: log, inputs=[system_logs_state], outputs=[logs_display])
     clear_log_btn.click(fn=lambda: ("", ""), inputs=None, outputs=[system_logs_state, logs_display])
 
 app = gr.mount_gradio_app(app, demo, path="/", theme=gr.themes.Soft(primary_hue="blue"))
