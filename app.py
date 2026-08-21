@@ -125,6 +125,9 @@ STUDIO_PRESETS = {
 
 def generate_synthetic_breath(duration_ms=400):
     samples = int((duration_ms / 1000.0) * 44100)
+    # Return silence if duration is extremely small
+    if samples <= 0:
+        return AudioSegment.silent(duration=0)
     noise = np.random.normal(0, 0.05, samples)
     x = np.linspace(0, np.pi, samples)
     envelope = np.sin(x) ** 2
@@ -153,7 +156,7 @@ def insert_breaths(input_wav_path, output_wav_path):
                 b_file = random.choice(breath_files)
                 breath_snd = AudioSegment.from_file(b_file)
                 if len(breath_snd) > pause_duration: breath_snd = breath_snd[:pause_duration].fade_out(50)
-                remaining_silence = pause_duration - len(breath_snd)
+                remaining_silence = max(0, pause_duration - len(breath_snd))
                 output_audio += breath_snd + AudioSegment.silent(duration=remaining_silence)
             else:
                 breath_snd = generate_synthetic_breath(min(400, pause_duration))
@@ -229,51 +232,109 @@ async def _generate_audio_chunk(engine: str, mode: str, text_chunk: str, lang: s
         return audio_data, sample_rate
 
 async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str, ref_path: str, out_path: str, speed: float = 1.0, speaker_model: str = "Default Model", piper_model: str = "", apply_breaths: bool = False):
-    chunks = re.split(r'(?<=[.!?\n])\s+', full_text.strip())
-    chunks = [c for c in chunks if c.strip()]
-    if not chunks: chunks = [full_text]
+    
+    # --- MULTI-SPEAKER SCRIPT PARSER ---
+    # Detect if text contains speaker tags like [Speaker: th_TH-ntsc-medium.onnx] or [Speaker: en-US-AriaNeural]
+    script_segments = []
+    
+    # Regex to find tags like [Speaker: model_name]
+    speaker_tag_pattern = r'\[Speaker:\s*(.*?)\]'
+    
+    # Check if the text actually uses the script format
+    if re.search(speaker_tag_pattern, full_text, re.IGNORECASE):
+        # Split text by the tags. re.split with capture group keeps the matched tag content in the list.
+        parts = re.split(speaker_tag_pattern, full_text, flags=re.IGNORECASE)
+        
+        # parts[0] is text before the first tag. If it has text, it uses the default requested model.
+        if parts[0].strip():
+            script_segments.append({
+                "model": piper_model if "piper" in engine.lower() else speaker_model,
+                "text": parts[0].strip()
+            })
+            
+        # The rest of parts are paired: parts[1] is model name, parts[2] is text, parts[3] is model name, etc.
+        for i in range(1, len(parts), 2):
+            if i + 1 < len(parts):
+                current_model = parts[i].strip()
+                current_text = parts[i+1].strip()
+                if current_text:
+                    script_segments.append({
+                        "model": current_model,
+                        "text": current_text
+                    })
+    else:
+        # Standard single speaker format
+        script_segments.append({
+            "model": piper_model if "piper" in engine.lower() else speaker_model,
+            "text": full_text
+        })
+    # -----------------------------------
+
     all_audio_arrays = []
     sample_rate = 44100
     
-    if "edgetts" in engine.lower():
-        for chunk in chunks:
-            if not chunk.strip(): continue
-            audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, speaker_model, piper_model)
-            sample_rate = sr
-            all_audio_arrays.append(audio_data)
-            
-            # Add artificial small pause (0.6s) between sentences
-            pause_samples = int(sample_rate * 0.6)
-            if len(audio_data.shape) > 1:
-                pause = np.zeros((pause_samples, audio_data.shape[1]))
-            else:
-                pause = np.zeros((pause_samples,))
-                audio_data = audio_data.reshape(-1, 1)
-                pause = pause.reshape(-1, 1)
-            all_audio_arrays.append(pause)
-            
-    elif "pipertts" in engine.lower():
-        async with piper_lock:
+    for segment in script_segments:
+        segment_text = segment["text"]
+        
+        # Override the model based on the engine and script tag
+        current_piper_model = segment["model"] if "piper" in engine.lower() else piper_model
+        current_speaker_model = segment["model"] if "piper" not in engine.lower() else speaker_model
+        # For EdgeTTS, the "model" tag will be interpreted as the Voice Name (e.g. th-TH-NiwatNeural)
+        edge_voice_override = segment["model"] if "edge" in engine.lower() and segment["model"] != "Default Model" else None
+        
+        chunks = re.split(r'(?<=[.!?\n])\s+', segment_text)
+        chunks = [c for c in chunks if c.strip()]
+        
+        if "edgetts" in engine.lower():
             for chunk in chunks:
                 if not chunk.strip(): continue
-                audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, speaker_model, piper_model)
+                # Pass edge_voice_override through the speaker_model parameter hack
+                audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, edge_voice_override or speaker_model, piper_model)
                 sample_rate = sr
                 all_audio_arrays.append(audio_data)
-                pause = np.zeros((int(sample_rate * 0.6), audio_data.shape[1] if len(audio_data.shape) > 1 else 1)) 
+                
+                pause_samples = int(sample_rate * 0.6)
+                if len(audio_data.shape) > 1: pause = np.zeros((pause_samples, audio_data.shape[1]))
+                else:
+                    pause = np.zeros((pause_samples,))
+                    audio_data = audio_data.reshape(-1, 1)
+                    pause = pause.reshape(-1, 1)
                 all_audio_arrays.append(pause)
                 
-    else: 
-        async with gpu_lock:
-            for chunk in chunks:
-                if not chunk.strip(): continue
-                audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, speaker_model, piper_model)
-                sample_rate = sr
-                all_audio_arrays.append(audio_data)
-                pause = np.zeros((int(sample_rate * 0.6), audio_data.shape[1] if len(audio_data.shape) > 1 else 1)) 
-                all_audio_arrays.append(pause)
+        elif "pipertts" in engine.lower():
+            async with piper_lock:
+                for chunk in chunks:
+                    if not chunk.strip(): continue
+                    audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, speaker_model, current_piper_model)
+                    sample_rate = sr
+                    all_audio_arrays.append(audio_data)
+                    
+                    pause_samples = int(sample_rate * 0.6)
+                    if len(audio_data.shape) > 1: pause = np.zeros((pause_samples, audio_data.shape[1]))
+                    else:
+                        pause = np.zeros((pause_samples,))
+                        audio_data = audio_data.reshape(-1, 1)
+                        pause = pause.reshape(-1, 1)
+                    all_audio_arrays.append(pause)
+                    
+        else: 
+            async with gpu_lock:
+                for chunk in chunks:
+                    if not chunk.strip(): continue
+                    audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, current_speaker_model, piper_model)
+                    sample_rate = sr
+                    all_audio_arrays.append(audio_data)
+                    
+                    pause_samples = int(sample_rate * 0.6)
+                    if len(audio_data.shape) > 1: pause = np.zeros((pause_samples, audio_data.shape[1]))
+                    else:
+                        pause = np.zeros((pause_samples,))
+                        audio_data = audio_data.reshape(-1, 1)
+                        pause = pause.reshape(-1, 1)
+                    all_audio_arrays.append(pause)
                 
     temp_concat_path = os.path.join(TEMP_DIR, f"pre_foley_{uuid.uuid4().hex}.wav")
-    
+
     def write_concat():
         if all_audio_arrays:
             final_audio = np.concatenate(all_audio_arrays, axis=0)
