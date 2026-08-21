@@ -445,23 +445,21 @@ def _process_video_edit_sync(
     if text_lines and text_lines.strip():
         lines = text_lines.split("\n")
         lines = [l.strip() for l in lines if l.strip()]
-        box_width = int(video.w * 0.85) 
-        start_y = int(video.h * 0.25)   
-        spacing = 30                    
-        current_y = start_y
-        # Bypass ImageMagick altogether if it's deadlocking 
-        # by avoiding TextClip. Instead just continue without text or warn
-        print("Notice: Skipping text rendering overlay to avoid ImageMagick locks on this VPS.")
+        # We will handle text rendering via direct FFmpeg overlay after MoviePy finishes
+        # to avoid ImageMagick Deadlocks.
+        pass
 
     if add_watermark and add_watermark.strip():
-        print("Notice: Skipping watermark overlay to avoid ImageMagick locks on this VPS.")
+        # We will handle watermark rendering via direct FFmpeg overlay after MoviePy finishes
+        pass
 
     if len(clips_to_composite) > 1: video = CompositeVideoClip(clips_to_composite)
 
     # Use extremely safe render profile for MoviePy v2
+    temp_no_text_path = output_path.replace(".mp4", "_notext.mp4")
     try:
         video.write_videofile(
-            output_path, 
+            temp_no_text_path, 
             codec="libx264", 
             audio_codec="aac",
             fps=24,          
@@ -469,16 +467,83 @@ def _process_video_edit_sync(
             threads=1,       
             preset="ultrafast" 
         )
+        video.close()
+        if 'final_audio' in locals() and final_audio: final_audio.close()
+        
+        # ---------------------------------------------------------
+        # FFMPEG DIRECT DRAWTEXT (LIGHTWEIGHT & BLAZING FAST)
+        # ---------------------------------------------------------
+        if (text_lines and text_lines.strip()) or (add_watermark and add_watermark.strip()):
+            import subprocess
+            vf_filters = []
+            
+            if text_lines and text_lines.strip():
+                lines = text_lines.split("\n")
+                lines = [l.strip() for l in lines if l.strip()]
+                # Base Y position (25% from top)
+                start_y_expr = "(h*0.25)"
+                
+                for i, line in enumerate(lines):
+                    # Escape special characters for ffmpeg filter
+                    safe_line = line.replace(":", "\\:").replace("'", "'\\\\''")
+                    # Calculate Y position dynamically for each line (spacing = 80px)
+                    y_expr = f"{start_y_expr} + ({i}*80)"
+                    
+                    # White text, black shadow/box for readability
+                    # Escaping fontfile correctly for FFmpeg: 
+                    # If font_arg contains standard paths like /app/assets/fonts/Sarabun-Bold.ttf it should work
+                    safe_font = font_arg.replace("\\", "/") 
+                    draw_filter = (
+                        f"drawtext=fontfile='{safe_font}':text='{safe_line}':"
+                        f"fontcolor=white:fontsize=45:"
+                        f"box=1:boxcolor=black@0.6:boxborderw=10:"
+                        f"x=(w-text_w)/2:y={y_expr}"
+                    )
+                    vf_filters.append(draw_filter)
+                    
+            if add_watermark and add_watermark.strip():
+                safe_wm = add_watermark.replace(":", "\\:").replace("'", "'\\\\''")
+                safe_font = font_arg.replace("\\", "/") 
+                wm_filter = (
+                    f"drawtext=fontfile='{safe_font}':text='{safe_wm}':"
+                    f"fontcolor=white@0.7:fontsize=35:"
+                    f"x=w-text_w-30:y=h-text_h-30"
+                )
+                vf_filters.append(wm_filter)
+                
+            # Combine all filters
+            vf_string = ",".join(vf_filters)
+            
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", 
+                "-i", temp_no_text_path,
+                "-vf", vf_string,
+                "-c:a", "copy", # Copy audio without re-encoding
+                "-c:v", "libx264", "-preset", "ultrafast",
+                output_path
+            ]
+            
+            print(f"Running FFmpeg DrawText: {' '.join(ffmpeg_cmd)}")
+            result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode != 0:
+                print(f"FFmpeg DrawText Error: {result.stderr}")
+                # Fallback to the no-text version if filter fails
+                os.rename(temp_no_text_path, output_path)
+            else:
+                os.remove(temp_no_text_path)
+        else:
+            # No text needed, just rename temp to output
+            os.rename(temp_no_text_path, output_path)
+
     except Exception as e:
         print(f"Render Error: {e}")
         # Always make sure to close the clip handlers on crash to prevent file locks
-        video.close()
-        if 'final_audio' in locals() and final_audio: final_audio.close()
+        try: video.close()
+        except: pass
+        if 'final_audio' in locals() and final_audio: 
+            try: final_audio.close()
+            except: pass
         raise e
-    
-    video.close()
-    if 'final_audio' in locals() and final_audio: final_audio.close()
-
 async def process_video_edit_async(*args, **kwargs):
     # To bypass extreme MoviePy FFmpeg deadlock on low core environments, we strictly run it 
     # via to_thread but isolate its execution contexts inside the sync function
