@@ -241,7 +241,15 @@ async def generate_tts_safely(engine: str, mode: str, full_text: str, lang: str,
             audio_data, sr = await _generate_audio_chunk(engine, mode, chunk, lang, ref_path, speed, speaker_model, piper_model)
             sample_rate = sr
             all_audio_arrays.append(audio_data)
-            pause = np.zeros((int(sample_rate * 0.6), audio_data.shape[1] if len(audio_data.shape) > 1 else 1)) 
+            
+            # Add artificial small pause (0.6s) between sentences
+            pause_samples = int(sample_rate * 0.6)
+            if len(audio_data.shape) > 1:
+                pause = np.zeros((pause_samples, audio_data.shape[1]))
+            else:
+                pause = np.zeros((pause_samples,))
+                audio_data = audio_data.reshape(-1, 1)
+                pause = pause.reshape(-1, 1)
             all_audio_arrays.append(pause)
             
     elif "pipertts" in engine.lower():
