@@ -1,12 +1,12 @@
 # 📐 API Endpoint Design for Video Templates
 
-เพื่อรองรับ Use Case รูปแบบอัตโนมัติ 2 แบบ (Quote 16:9 และ Pro Vlog) เราจะสร้าง **API Endpoints ย่อยแยกกันชัดเจน** เพื่อให้ n8n เรียกใช้งานได้ง่าย ลดความสับสนของพารามิเตอร์ และง่ายต่อการปรับแต่งในอนาคต
+เพื่อรองรับ Use Case รูปแบบอัตโนมัติ 2 แบบ (Quote 9:16 และ Pro Vlog) เราจะสร้าง **API Endpoints ย่อยแยกกันชัดเจน** เพื่อให้ n8n เรียกใช้งานได้ง่าย ลดความสับสนของพารามิเตอร์ และง่ายต่อการปรับแต่งในอนาคต
 
 ---
 
-## 🟢 Endpoint 1: The Quote & Tip (คำคม / 16:9 Transformation)
-**Endpoint:** `POST /api/video/templates/quote169`
-**หน้าที่:** นำวิดีโอ (ไม่ว่าสัดส่วนไหน) มาบังคับเป็นแนวนอน 16:9 โดยใช้เทคนิคฉากหลังเบลอ (Smart Background Blur) ลบเสียงเดิม แปะข้อความตรงกลาง และสวมเสียง TTS/BGM ใหม่
+## 🟢 Endpoint 1: The Quote & Tip (คำคม / 9:16 Transformation)
+**Endpoint:** `POST /api/video/templates/quote916`
+**หน้าที่:** นำวิดีโอ (ไม่ว่าสัดส่วนไหน) มาบังคับเป็นแนวตั้ง 9:16 โดยใช้เทคนิคฉากหลังเบลอ (Smart Background Blur) ลบเสียงเดิม แปะข้อความตรงกลาง และสวมเสียง TTS/BGM ใหม่
 
 **Parameters (Form-Data):**
 * `video_path` (Required): พาธไฟล์วิดีโอต้นฉบับ
@@ -50,4 +50,4 @@
    - สร้างไฟล์ `subtitle_engine.py` สำหรับสร้างไฟล์ `.ass`
    - สร้างฟังก์ชัน `apply_smart_blur()` ใน `ffmpeg_processor.py`
 3. **ปรับแต่ง `app.py`:** เพิ่ม 2 Endpoints ใหม่ ตามโครงสร้างด้านบน
-4. **ทดสอบระบบ:** จำลองสร้างคลิป Quote 16:9 และ VLOG 1 คลิป เพื่อดูผลลัพธ์
+4. **ทดสอบระบบ:** จำลองสร้างคลิป Quote 9:16 และ VLOG 1 คลิป เพื่อดูผลลัพธ์

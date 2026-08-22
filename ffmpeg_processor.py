@@ -48,8 +48,8 @@ def process_video(
     font_opt = f":fontfile='{font_file}'" if font_file and os.path.exists(font_file) else ""
     
     if template_type == "quote_169":
-        # Smart Background Blur: 16:9 
-        # split video into 2 streams, scale first to 16:9 and blur, scale second to fit height and overlay
+        # Smart Background Blur: 9:16 (For TikTok, Reels, Shorts) 
+        # split video into 2 streams, scale first to 9:16 and blur, scale second to fit height and overlay
         video_filters.append(f"{last_v_pad}split=2[bg][fg]")
         video_filters.append(f"[bg]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,gblur=sigma=30[bg_blur]")
         video_filters.append(f"[fg]scale=1920:1080:force_original_aspect_ratio=decrease[fg_scaled]")
