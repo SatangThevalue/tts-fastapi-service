@@ -26,7 +26,7 @@
 *   **Edge TTS (`edge-tts`)**: โมเดลเสียงจาก Microsoft สำหรับงานที่ต้องการความเร็วระดับเสี้ยววินาทีและเสียงที่เป็นธรรมชาติสูง (รันบน CPU แต่ต้องการอินเทอร์เน็ต)
 *   **Pedalboard (by Spotify)**: ไลบรารี C++ สำหรับประมวลผลเสียง (DSP) ระดับสตูดิโอ ทำงานไวกว่าไลบรารีเสียงทั่วไปหลายเท่า 
 *   **PyDub & SoundFile**: จัดการโครงสร้างคลื่นเสียง (Waveforms) พื้นฐาน เช่น การตัดต่อ, การหาความเงียบ (Silence Detection), และการเขียนไฟล์ `.wav` / `.flac`
-*   **MoviePy**: เอนจิ้นตัดต่อวิดีโอ (Video Automation) อาศัย FFmpeg เบื้องหลัง ทำหน้าที่ครอปภาพแนวตั้ง 9:16, สวมเสียงพากย์, และใส่ข้อความทับลงไป
+*   **FFmpeg Complex Filter (Ultimate Performance Architecture)**: เปลี่ยนจากการใช้ MoviePy มาเป็นการเขียนสคริปต์ประกอบคำสั่ง FFmpeg ตรงแบบม้วนเดียวจบ (Single-pass Processing) ลดการอ่านเขียนไฟล์ I/O และประหยัด RAM เซิร์ฟเวอร์ได้มหาศาล ทำหน้าที่ครอปภาพแนวตั้ง 9:16, สวมเสียงพากย์, และใส่ข้อความทับลงไปได้อย่างรวดเร็ว
 *   **FastMCP**: โพรโทคอลมาตรฐาน (Model Context Protocol) ที่ทำให้แอปพลิเคชัน AI ภายนอก (เช่น Claude Desktop หรือ Cursor) สามารถสื่อสารและสั่งให้เซิร์ฟเวอร์นี้ผลิตเสียงได้โดยตรง
 
 ---
@@ -97,60 +97,12 @@ tts-fastapi-service/
 
 ---
 
+
 ## 5. คู่มือการใช้งาน API (สำหรับ n8n)
 
-ระบบนี้ถูกออกแบบมาเพื่อ Automation อย่างแท้จริง ทุก Endpoints มีการป้องกัน **GPU/CPU OOM (Out of Memory)** ด้วยระบบ `asyncio.Lock()` เรียบร้อยแล้ว (เข้าคิวประมวลผลทีละ 1 งาน)
+เราได้เตรียมคู่มือ API โดยละเอียดพร้อม **5 ตัวอย่างการใช้งานจริง** (เช่น การลบเสียง, แปลงคลิปแนวตั้ง, Mix เสียง) สามารถอ่านได้ที่:
+👉 [**API_EXAMPLES.md**](./API_EXAMPLES.md)
 
-### 🔐 การตั้งค่าความปลอดภัย (Authentication)
-หากต้องการป้องกันไม่ให้คนอื่นมาแอบใช้ API ให้ตั้งค่า Environment Variable บนเซิร์ฟเวอร์:
-`export TTS_API_KEY="your_secret_key"`
-เมื่อตั้งค่าแล้ว n8n ต้องแนบ Header: `X-API-Key: your_secret_key` มาในทุก Request
-
----
-
-### 🎙️ API 1: สร้างเสียงพากย์ (TTS Endpoint)
-เปลี่ยนข้อความให้กลายเป็นไฟล์เสียง `.wav`
-
-*   **Endpoint:** `POST /api/tts/generate`
-*   **Body Content Type:** `Multipart-Form Data`
-*   **Parameters:**
-    *   `text` *(String)* **[บังคับ]**: ข้อความที่ต้องการให้พูด (หากยาวมาก ระบบจะหั่นทีละประโยคให้อัตโนมัติ)
-    *   `engine` *(String)*: เลือกขุมพลัง (Default: `PiperTTS (Fast CPU / Offline)`)
-        *   ค่าที่รองรับ: `PiperTTS (Fast CPU / Offline)`, `EdgeTTS (Fast CPU / Online)`, `CosyVoice 3.0`, `OmniVoice`
-    *   `piper_model` *(String)*: ระบุชื่อไฟล์โมเดล (เช่น `th_TH-ntsc-medium.onnx`) **หากไม่ระบุ ระบบจะดึงไฟล์ .onnx แรกที่เจอในเครื่องมาใช้ให้อัตโนมัติ**
-    *   `speed` *(Float)*: ความเร็ว (Default: `1.0`)
-    *   `apply_breaths` *(Boolean)*: แทรกเสียงหายใจ (Default: `false`)
-    *   `apply_deessing` *(Boolean)*: ลดเสียงเสียดหู (Default: `false`)
-    *   `apply_tape_saturation` *(Boolean)*: เพิ่มความอุ่นอนาล็อก (Default: `false`)
-
-**📥 ผลลัพธ์:** ส่งกลับไฟล์เสียง Binary `audio/wav` 
-
----
-
-### 🎬 API 2: ตัดต่อวิดีโอ (Video Editing Endpoint)
-แปลง Footage วิดีโอธรรมดา ให้กลายเป็นวิดีโอแนวตั้ง (9:16) สวมเสียงพากย์ และขึ้น Subtitle แบบ List
-
-*   **Endpoint:** `POST /api/video/edit`
-*   **Body Content Type:** `Multipart-Form Data`
-*   **Parameters:**
-    *   `video_file` *(File)* หรือ `video_local_path` *(String)*: ไฟล์ Footage ต้นฉบับ
-        *   *(Tip: การใช้ `video_local_path` จะเร็วกว่ามหาศาล หาก n8n รันอยู่บนเซิร์ฟเวอร์เดียวกัน เพราะข้ามขั้นตอนการอัปโหลดไปเลย)*
-    *   `audio_file` *(File)* หรือ `audio_local_path` *(String)*: ไฟล์เสียงพากย์ที่จะนำมาสวมทับ
-    *   `short_video_format` *(Boolean)*: บังคับ Crop หน้าจอเป็น 1080x1920 (Default: `true`)
-    *   `mute_original_audio` *(Boolean)*: ปิดเสียงวิดีโอเดิม (Default: `true`)
-    *   `text_lines` *(String)*: ข้อความที่จะวางเรียงกึ่งกลางจอ (ใส่ `\n` เพื่อขึ้นบรรทัดใหม่ / สร้างกล่องข้อความใหม่)
-    *   `watermark_text` *(String)*: ลายน้ำที่มุมขวาล่าง
-
-**📥 ผลลัพธ์:** ส่งกลับไฟล์วิดีโอ Binary `video/mp4` พร้อมโพสต์ลง Social Media
-
----
-
-## 6. คู่มือหน้าเว็บ Gradio UI
-
-หากคุณไม่ได้ใช้ n8n ก็สามารถเข้าใช้งานด้วยมือผ่าน Web UI ได้ที่ `http://<your-ip>:7860` 
-
-*   **Tab 1 (Audio Tools):** หน้าต่างผลิตเสียงหลัก เลือก Engine, ปรับความเร็ว, และตั้งค่าอารมณ์
-*   **Tab 2 (Model Manager):** หน้านี้สำคัญมาก! ใช้สำหรับ **อัปโหลด (Upload)** โมเดลเสียงใหม่ๆ (เช่น `.onnx` ของ Piper) หรือไฟล์น้ำหนัก Fine-tuned เข้าไปในเซิร์ฟเวอร์ และสามารถ **ลบ (Delete)** โมเดลที่ไม่ได้ใช้ทิ้งได้จากหน้าเว็บเลยโดยไม่ต้องต่อ SSH เข้าเซิร์ฟเวอร์ เมื่ออัปโหลดเสร็จกดปุ่ม "Refresh" เมนูทุกจุดจะอัปเดตโมเดลใหม่ให้อัตโนมัติ
-*   **Tab 3 (Advanced Audio Mastering):** โซนสำหรับคนทำ Podcast ปรับแต่ง EQ, Reverb, De-essing ได้อย่างละเอียด พร้อมฟีเจอร์ "10 Studio Presets" ที่เซ็ตค่าให้พร้อมใช้
-*   **Tab 4 (Video Automator):** หน้าอัปโหลดคลิป Footage และพิมพ์รายการข้อความ เพื่อเรนเดอร์คลิปวิดีโอ 9:16 แนวตั้งสำหรับโพสต์ลง Social
-*   **System Logs (ด้านขวา):** แผง Console ที่โชว์การทำงานหลังบ้านทุกขั้นตอน ช่วยให้รู้ว่าตอนนี้ระบบกำลังทำอะไรอยู่ (เช่น กำลังคิวรัน GPU, ตัดต่อวิดีโอ, หรือหั่นข้อความ)
+### จุดเด่นของ API ปัจจุบัน:
+1. **Ultimate Performance FFmpeg**: ทุก Endpoint วิดีโอทำงานด้วยสคริปต์ FFmpeg Complex Filter ชั้นสูง ประหยัด RAM ไม่ต้องใช้ MoviePy
+2. **Auto-Provisioning**: มีระบบดาวน์โหลด Base Models (Piper TTS) อัตโนมัติเมื่อติดตั้งระบบใหม่

@@ -19,7 +19,7 @@ from pydub.silence import split_on_silence, detect_silence
 from pedalboard import Pedalboard, Compressor, HighpassFilter, LowShelfFilter, HighShelfFilter, NoiseGate, Limiter, Reverb, Chorus, Distortion, PitchShift, Delay, Convolution
 
 # Video Editing (MoviePy v2)
-from moviepy import VideoFileClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip, CompositeAudioClip
+# from moviepy import VideoFileClip... (Replaced with FFmpeg Complex Filter)
 
 # CPU-based TTS
 import edge_tts
@@ -27,9 +27,14 @@ from piper.voice import PiperVoice
 
 # FastAPI & Gradio
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, Depends
+
+app = FastAPI(title='AI Media Studio API')
+
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 import gradio as gr
+from ffmpeg_processor import process_video
+
 
 # MCP (Model Context Protocol)
 from mcp.server.fastmcp import FastMCP
@@ -401,170 +406,47 @@ async def apply_studio_mastering_async(*args, **kwargs):
 # VIDEO EDITING
 # ==========================================
 def _process_video_edit_sync(
-    video_path: str, audio_path: str, output_path: str, trim_start: float = 0.0, trim_end: float = None, 
-    mute_original_audio: bool = False, short_video_format: bool = True, add_watermark: str = "", text_lines: str = "",
-    font_size: int = 60, text_y_position: str = "center", box_opacity: float = 0.65
+    video_path: str,
+    audio_path: str = None,
+    bgm_path: str = None,
+    output_path: str = None,
+    mute_original_audio: bool = False,
+    short_video_format: bool = True,
+    add_watermark: str = "",
+    text_lines: str = "",
+    font_size: int = 60,
+    text_y_position: str = "center",
+    box_opacity: float = 0.65,
+    font_color: str = "white",
+    box_color: str = "black",
+    bgm_volume: float = 0.3,
+    voice_volume: float = 1.0,
+    trim_start: float = 0.0,
+    trim_end: float = None
 ):
-    video = VideoFileClip(video_path)
-    if trim_end is None or trim_end <= 0: trim_end = video.duration
-    # In moviepy v2, subclip is replaced by subclipped
-    video = video.subclipped(trim_start, trim_end)
-
-    if mute_original_audio: video = video.without_audio()
-
-    if short_video_format:
-        target_w, target_h = 1080, 1920
-        video_aspect = video.w / video.h
-        target_aspect = target_w / target_h
-        if video_aspect > target_aspect:
-            new_w = int(video.h * target_aspect)
-            video = video.cropped(x_center=video.w / 2, width=new_w, height=video.h)
-        else:
-            new_h = int(video.w / target_aspect)
-            video = video.cropped(y_center=video.h / 2, width=video.w, height=new_h)
-        video = video.resized((target_w, target_h))
-
-    final_audio = None
-    if audio_path and os.path.exists(audio_path):
-        new_audio = AudioFileClip(audio_path)
-        new_audio = new_audio.with_duration(min(new_audio.duration, video.duration))
-        if mute_original_audio or video.audio is None:
-            final_audio = new_audio
-        else:
-            final_audio = CompositeAudioClip([video.audio.with_volume_scaled(0.3), new_audio])
-                
-    if final_audio: video = video.with_audio(final_audio)
-
-    clips_to_composite = [video]
+    """Replaced with FFmpeg Processor"""
+    from ffmpeg_processor import process_video
+    
+    if not output_path:
+        output_path = f"{video_path}_ffmpeg_edited.mp4"
         
-    font_arg = DEFAULT_THAI_FONT_PATH if os.path.exists(DEFAULT_THAI_FONT_PATH) else 'Arial'
-        
-    # Override ImageMagick binary path for Linux if needed (Fix for 'unset' error)
-    if os.name == 'posix':
-        os.environ["IMAGEMAGICK_BINARY"] = "/usr/bin/convert"
-            
-    if text_lines and text_lines.strip():
-        lines = text_lines.split("\n")
-        lines = [l.strip() for l in lines if l.strip()]
-        # We will handle text rendering via direct FFmpeg overlay after MoviePy finishes
-        # to avoid ImageMagick Deadlocks.
-        pass
-
-    if add_watermark and add_watermark.strip():
-        # We will handle watermark rendering via direct FFmpeg overlay after MoviePy finishes
-        pass
-
-    if len(clips_to_composite) > 1: video = CompositeVideoClip(clips_to_composite)
-
-    # Use extremely safe render profile for MoviePy v2
-    temp_no_text_path = output_path.replace(".mp4", "_notext.mp4")
-    try:
-        video.write_videofile(
-            temp_no_text_path, 
-            codec="libx264", 
-            audio_codec="aac",
-            fps=24,          
-            logger=None,
-            threads=1,       
-            preset="ultrafast" 
-        )
-        video.close()
-        if 'final_audio' in locals() and final_audio: final_audio.close()
-        
-        # ---------------------------------------------------------
-        # FFMPEG DIRECT DRAWTEXT (LIGHTWEIGHT & BLAZING FAST)
-        # ---------------------------------------------------------
-        if (text_lines and text_lines.strip()) or (add_watermark and add_watermark.strip()):
-            import subprocess
-            vf_filters = []
-            
-            if text_lines and text_lines.strip():
-                lines = text_lines.split("\n")
-                lines = [l.strip() for l in lines if l.strip()]
-                # Base Y position (25% from top)
-                start_y_expr = "(h*0.25)"
-                
-                # In order to support multiline text block naturally and centered
-                # We can construct a single drawtext filter with text parameter containing newlines
-                # However, FFmpeg text parameter newlines can be tricky.
-                # Alternative: join lines with \n
-                multiline_text = "\\n".join(lines)
-                safe_line = multiline_text.replace(":", "\\:").replace("'", "'\\\\''")
-                
-                safe_font = font_arg.replace("\\", "/") 
-                # Y position handling
-                if text_y_position == "top":
-                    y_expr = "(h*0.15)"
-                elif text_y_position == "bottom":
-                    y_expr = "(h*0.75)"
-                else: # center
-                    y_expr = "(h-text_h)/2"
-                    
-                draw_filter = (
-                    f"drawtext=fontfile='{safe_font}':text='{safe_line}':"
-                    f"fontcolor=white:fontsize={font_size}:"
-                    f"box=1:boxcolor=black@{box_opacity}:boxborderw=15:"
-                    f"x=(w-text_w)/2:y={y_expr}:"
-                    f"line_spacing=25"
-                )
-                vf_filters.append(draw_filter)
-                    
-            if add_watermark and add_watermark.strip():
-                safe_wm = add_watermark.replace(":", "\\:").replace("'", "'\\\\''")
-                safe_font = font_arg.replace("\\", "/") 
-                wm_filter = (
-                    f"drawtext=fontfile='{safe_font}':text='{safe_wm}':"
-                    f"fontcolor=white@0.7:fontsize=35:"
-                    f"x=w-text_w-30:y=h-text_h-30"
-                )
-                vf_filters.append(wm_filter)
-                
-            # Combine all filters
-            vf_string = ",".join(vf_filters)
-            
-            ffmpeg_cmd = [
-                "ffmpeg", "-y", 
-                "-i", temp_no_text_path,
-                "-vf", vf_string,
-                "-c:a", "copy", # Copy audio without re-encoding
-                "-c:v", "libx264", "-preset", "ultrafast",
-                output_path
-            ]
-            
-            print(f"Running FFmpeg DrawText: {' '.join(ffmpeg_cmd)}")
-            result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if result.returncode != 0:
-                print(f"FFmpeg DrawText Error: {result.stderr}")
-                # Fallback to the no-text version if filter fails
-                os.rename(temp_no_text_path, output_path)
-            else:
-                os.remove(temp_no_text_path)
-        else:
-            # No text needed, just rename temp to output
-            os.rename(temp_no_text_path, output_path)
-
-    except Exception as e:
-        print(f"Render Error: {e}")
-        # Always make sure to close the clip handlers on crash to prevent file locks
-        try: video.close()
-        except: pass
-        if 'final_audio' in locals() and final_audio: 
-            try: final_audio.close()
-            except: pass
-        raise e
-async def process_video_edit_async(*args, **kwargs):
-    # To bypass extreme MoviePy FFmpeg deadlock on low core environments, we strictly run it 
-    # via to_thread but isolate its execution contexts inside the sync function
-    await asyncio.to_thread(_process_video_edit_sync, *args, **kwargs)
-
-
-# ==========================================
-# FastAPI Setup
-# ==========================================
-app = FastAPI(title="AI Media Studio API (Audio & Video)")
-mcp = FastMCP("Media_Studio_MCP")
-# Register tools to FastMCP directly
-@mcp.tool()
+    res = process_video(
+        input_video=video_path,
+        output_video=output_path,
+        mute_original_audio=mute_original_audio,
+        bgm_file=bgm_path or audio_path,
+        bgm_volume=bgm_volume,
+        crop_916=short_video_format,
+        drawtext_text=text_lines if text_lines else None,
+        font_size=font_size,
+        font_color=font_color
+    )
+    
+    if res.get("status") == "error":
+        print(f"FFmpeg Error: {res.get('error')}")
+        raise Exception(f"FFmpeg Error: {res.get('error')}")
+    
+    print(f"Video saved to: {output_path}")
 def generate_podcast_tts(text: str, preset: str = "Podcast Studio") -> str:
     """Generate professional TTS with studio mastering via MCP"""
     return f"Audio generation queued for: {text[:20]}..."
@@ -585,6 +467,17 @@ except Exception as e:
 @app.get("/api/health")
 async def health_check():
     return {"status": "healthy", "service": "AI Media Studio App", "auth_required": bool(API_KEY_SECRET)}
+
+
+@app.post("/api/models/download_defaults", tags=["Models"])
+async def api_download_default_models():
+    """Endpoint for n8n to force download default Base Models"""
+    try:
+        import subprocess
+        result = subprocess.run(["python3", os.path.join(BASE_DIR, "setup_models.py")], capture_output=True, text=True, check=True)
+        return {"status": "success", "message": "Default models downloaded successfully", "details": result.stdout}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/tts/generate")
 async def api_generate_tts(
@@ -640,35 +533,48 @@ async def api_generate_tts(
 
     return FileResponse(path=raw_output_path, media_type="audio/wav", filename=f"tts_raw.wav")
 
-@app.post("/api/video/edit")
+@app.post("/api/video/edit", tags=["Video"])
 async def api_video_edit(
-    video_file: UploadFile = File(None), video_local_path: str = Form(""),
-    audio_file: UploadFile = File(None), audio_local_path: str = Form(""),
-    trim_start: float = Form(0.0), trim_end: float = Form(0.0), mute_original_audio: bool = Form(True), 
-    short_video_format: bool = Form(True), text_lines: str = Form(""), watermark_text: str = Form(""),
-    font_size: int = Form(60), text_y_position: str = Form("center"), box_opacity: float = Form(0.65),
-    return_local_path: bool = Form(False), api_key: str = Depends(verify_api_key)
+    video_path: str = Form(...),
+    trim_start: float = Form(0.0),
+    trim_end: float = Form(None),
+    mute_original_audio: bool = Form(False),
+    bgm_path: str = Form(None),
+    bgm_volume: float = Form(0.3),
+    short_video_format: bool = Form(False),
+    text_lines: str = Form(""),
+    font_size: int = Form(48),
+    font_color: str = Form("white")
 ):
-    cleanup_old_files()
-    job_id = str(uuid.uuid4())
-    vid_path = video_local_path if (video_local_path and os.path.exists(video_local_path)) else None
-    if not vid_path and video_file:
-        vid_path = os.path.join(UPLOAD_DIR, f"{job_id}_vid.mp4")
-        with open(vid_path, "wb") as f: f.write(await video_file.read())
-    if not vid_path: raise HTTPException(status_code=400, detail="Must provide video_file or valid video_local_path")
-        
-    aud_path = audio_local_path if (audio_local_path and os.path.exists(audio_local_path)) else None
-    if not aud_path and audio_file:
-        aud_path = os.path.join(UPLOAD_DIR, f"{job_id}_aud.wav")
-        with open(aud_path, "wb") as f: f.write(await audio_file.read())
-
-    out_vid_path = os.path.join(OUTPUT_DIR, f"{job_id}_output.mp4")
+    """Ultimate Performance FFmpeg Complex Filter Endpoint for n8n"""
     try:
-        await process_video_edit_async(vid_path, aud_path, out_vid_path, trim_start, trim_end, mute_original_audio, short_video_format, watermark_text, text_lines, font_size, text_y_position, box_opacity)
-    except Exception as e: raise HTTPException(status_code=500, detail=f"Failed: {str(e)}")
-
-    if return_local_path: return JSONResponse(content={"status": "success", "output_path": out_vid_path})
-    return FileResponse(path=out_vid_path, media_type="video/mp4", filename="edited_video.mp4")
+        import os
+        from ffmpeg_processor import process_video
+        
+        if not os.path.exists(video_path):
+            raise HTTPException(status_code=400, detail=f"Input video not found: {video_path}")
+        
+        output = f"{video_path}_ffmpeg_edited.mp4"
+        
+        result = await asyncio.to_thread(
+            process_video,
+            input_video=video_path,
+            output_video=output,
+            mute_original_audio=mute_original_audio,
+            bgm_file=bgm_path,
+            bgm_volume=bgm_volume,
+            crop_916=short_video_format,
+            drawtext_text=text_lines if text_lines else None,
+            font_size=font_size,
+            font_color=font_color
+        )
+        
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("error"))
+            
+        return {"status": "success", "output_path": output, "command_used": result.get("cmd")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==========================================
 # Gradio UI Handlers
@@ -889,3 +795,26 @@ app = gr.mount_gradio_app(app, demo, path="/", theme=gr.themes.Soft(primary_hue=
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=7860)
+
+def ensure_base_models_exist():
+    import os
+    piper_dir = os.path.join(BASE_DIR, "pretrained_models", "piper_voices")
+    if not os.path.exists(piper_dir):
+        os.makedirs(piper_dir)
+        
+    # Check if there are any .onnx files
+    has_models = False
+    for f in os.listdir(piper_dir):
+        if f.endswith(".onnx"):
+            has_models = True
+            break
+            
+    if not has_models:
+        print("📥 [System] No Piper models found. Running Auto-Provisioning for Base Models...")
+        try:
+            import subprocess
+            subprocess.run(["python3", os.path.join(BASE_DIR, "setup_models.py")], check=True)
+        except Exception as e:
+            print(f"❌ [System] Auto-Provisioning failed: {e}")
+
+ensure_base_models_exist()
