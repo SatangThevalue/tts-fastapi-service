@@ -43,6 +43,7 @@
   - `text_lines`: "รีวิวสินค้าล่าสุด!"
   - `font_size`: `60`
   - `font_color`: `yellow`
+  - `font_name`: `Kanit-Bold` (ตัวเลือกฟอนต์)
 
 #### Example 4: สร้างคลิปแบบม้วนเดียวจบ (All-in-One: ครอป + ใส่ข้อความ + ปิดเสียงเดิม + ใส่ BGM)
 รีดประสิทธิภาพ FFmpeg สูงสุด ทำทุกอย่างในคำสั่งเดียว
@@ -60,6 +61,7 @@
   - `text_lines`: "© Satang AI Corporation"
   - `font_size`: `30`
   - `font_color`: `white`
+  - `font_name`: `ChakraPetch-Bold`
   - *(ไม่ระบุค่าอื่น ระบบจะคงขนาดวิดีโอเดิมและเสียงเดิมไว้)*
 
 ---

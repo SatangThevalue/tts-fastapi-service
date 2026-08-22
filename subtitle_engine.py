@@ -19,7 +19,7 @@ def format_timestamp(seconds: float) -> str:
         centisecs = 0
     return f"{hours}:{minutes:02d}:{secs:02d}.{centisecs:02d}"
 
-def generate_ass_subtitle(audio_path: str, output_ass_path: str, style: str = "tiktok_yellow"):
+def generate_ass_subtitle(audio_path: str, output_ass_path: str, style: str = "tiktok_yellow", font_name: str = "Sarabun-Bold"):
     """
     Transcribes audio and generates a dynamic .ass subtitle file.
     Provides Karaoke-style word highlighting.
@@ -43,7 +43,7 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Sarabun,80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,6,2,2,10,10,250,1
+Style: Default,{font_name},80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,6,2,2,10,10,250,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

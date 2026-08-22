@@ -106,3 +106,14 @@ tts-fastapi-service/
 ### จุดเด่นของ API ปัจจุบัน:
 1. **Ultimate Performance FFmpeg**: ทุก Endpoint วิดีโอทำงานด้วยสคริปต์ FFmpeg Complex Filter ชั้นสูง ประหยัด RAM ไม่ต้องใช้ MoviePy
 2. **Auto-Provisioning**: มีระบบดาวน์โหลด Base Models (Piper TTS) อัตโนมัติเมื่อติดตั้งระบบใหม่
+
+
+### 🔤 ฟอนต์ภาษาไทยฟรี (Commercial Use)
+ระบบได้ทำการติดตั้งฟอนต์ 7 รูปแบบที่พร้อมให้ใช้งานผ่าน n8n (`font_name`) ดังนี้:
+1. `Sarabun-Bold` (ค่าเริ่มต้น - ทางการ สุภาพ)
+2. `Prompt-Bold` (โมเดิร์น ไร้หัว อ่านง่าย)
+3. `Kanit-Bold` (โดดเด่น วัยรุ่น ยอดฮิต)
+4. `Mitr-Bold` (กว้าง ชัดเจน เป็นมิตร)
+5. `ChakraPetch-Bold` (เหลี่ยม ทันสมัย เทคโนโลยี)
+6. `Pridi-Bold` (มีหัว คลาสสิก)
+7. `Pattaya-Regular` (มีหัว ลายมือ ตวัด)

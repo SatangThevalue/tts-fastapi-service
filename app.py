@@ -59,17 +59,29 @@ for d in [UPLOAD_DIR, OUTPUT_DIR, ASSETS_DIR, IR_DIR, SPEAKERS_DIR, PIPER_DIR, F
 
 DEFAULT_THAI_FONT_PATH = os.path.join(FONTS_DIR, "Sarabun-Bold.ttf")
 
-def ensure_thai_font_exists():
+def ensure_fonts_exist():
+    # Only try to download if the directory is missing basic fonts
     if not os.path.exists(DEFAULT_THAI_FONT_PATH):
-        print("📥 [System] Thai font missing. Downloading Sarabun-Bold.ttf from Google Fonts...")
+        print("📥 [System] Fonts missing. Attempting to download default Sarabun-Bold...")
         font_url = "https://github.com/google/fonts/raw/main/ofl/sarabun/Sarabun-Bold.ttf"
         try:
+            import urllib.request
             urllib.request.urlretrieve(font_url, DEFAULT_THAI_FONT_PATH)
-            print(f"✅ [System] Font downloaded successfully to {DEFAULT_THAI_FONT_PATH}")
         except Exception as e:
-            print(f"❌ [System] Failed to download font: {e}")
+            print(f"❌ [System] Failed to download default font: {e}")
 
-ensure_thai_font_exists()
+ensure_fonts_exist()
+
+def get_font_path(font_name: str) -> str:
+    """Helper to resolve font paths dynamically"""
+    if not font_name:
+        return DEFAULT_THAI_FONT_PATH
+    # Add .ttf if omitted
+    if not font_name.endswith('.ttf'):
+        font_name += '.ttf'
+    path = os.path.join(FONTS_DIR, font_name)
+    return path if os.path.exists(path) else DEFAULT_THAI_FONT_PATH
+
 
 API_KEY_SECRET=os.environ.get("TTS_API_KEY", "") 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -439,7 +451,8 @@ def _process_video_edit_sync(
         crop_916=short_video_format,
         drawtext_text=text_lines if text_lines else None,
         font_size=font_size,
-        font_color=font_color
+        font_color=font_color,
+            font_file=get_font_path(font_name)
     )
     
     if res.get("status") == "error":
@@ -540,7 +553,8 @@ async def api_template_quote916(
     text_lines: str = Form(...),
     audio_path: str = Form(None),
     font_size: int = Form(60),
-    font_color: str = Form("white")
+    font_color: str = Form("white"),
+    font_name: str = Form("Sarabun-Bold")
 ):
     """Template: Smart Background Blur to 9:16 + Center Text + Audio Replacement"""
     try:
@@ -562,8 +576,9 @@ async def api_template_quote916(
             drawtext_text=text_lines,
             font_size=font_size,
             font_color=font_color,
+            font_file=get_font_path(font_name),
             template_type="quote_916",
-            font_file=os.path.join(BASE_DIR, 'assets', 'fonts', 'Sarabun-Bold.ttf')
+            font_file=get_font_path(font_name)
         )
         if result.get("status") == "error":
             raise HTTPException(status_code=500, detail=result.get("error"))
@@ -576,7 +591,8 @@ async def api_template_pro_vlog(
     video_path: str = Form(...),
     audio_path: str = Form(None),
     subtitle_style: str = Form("tiktok_yellow"),
-    enhance_audio: bool = Form(True)
+    enhance_audio: bool = Form(True),
+    font_name: str = Form("Sarabun-Bold")
 ):
     """Template: Dynamic Subtitles (Karaoke) + Audio Mastering"""
     try:
@@ -590,7 +606,7 @@ async def api_template_pro_vlog(
         target_audio = audio_path if audio_path else video_path
         
         ass_out = f"{video_path}.ass"
-        await asyncio.to_thread(generate_ass_subtitle, target_audio, ass_out, subtitle_style)
+        await asyncio.to_thread(generate_ass_subtitle, target_audio, ass_out, subtitle_style, font_name.replace(".ttf", ""))
         
         output = f"{video_path}_provlog.mp4"
         mute_orig = True if audio_path else False
@@ -623,7 +639,8 @@ async def api_video_edit(
     short_video_format: bool = Form(False),
     text_lines: str = Form(""),
     font_size: int = Form(48),
-    font_color: str = Form("white")
+    font_color: str = Form("white"),
+    font_name: str = Form("Sarabun-Bold")
 ):
     """Ultimate Performance FFmpeg Complex Filter Endpoint for n8n"""
     try:
@@ -645,7 +662,8 @@ async def api_video_edit(
             crop_916=short_video_format,
             drawtext_text=text_lines if text_lines else None,
             font_size=font_size,
-            font_color=font_color
+            font_color=font_color,
+            font_file=get_font_path(font_name)
         )
         
         if result.get("status") == "error":
