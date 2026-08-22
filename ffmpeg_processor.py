@@ -13,7 +13,9 @@ def process_video(
     drawtext_text: str = None,
     font_file: str = None,
     font_size: int = 48,
-    font_color: str = "white"
+    font_color: str = "white",
+    template_type: str = "raw",  # 'raw', 'quote_169', 'pro_vlog'
+    subtitle_ass_path: str = None
 ):
     """
     Dynamically constructs and executes an FFmpeg command using complex filters.
@@ -42,15 +44,37 @@ def process_video(
     video_filters = []
     last_v_pad = "[0:v]"
     
-    if crop_916:
-        # Crop to 9:16 (e.g., for Shorts/Reels) by taking the center
-        # iw = input width, ih = input height. Target width = ih * 9/16
-        video_filters.append(f"{last_v_pad}crop='ih*9/16':'ih'[vcrop]")
+    # Font path logic
+    font_opt = f":fontfile='{font_file}'" if font_file and os.path.exists(font_file) else ""
+    
+    if template_type == "quote_169":
+        # Smart Background Blur: 16:9 
+        # split video into 2 streams, scale first to 16:9 and blur, scale second to fit height and overlay
+        video_filters.append(f"{last_v_pad}split=2[bg][fg]")
+        video_filters.append(f"[bg]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,gblur=sigma=30[bg_blur]")
+        video_filters.append(f"[fg]scale=1920:1080:force_original_aspect_ratio=decrease[fg_scaled]")
+        video_filters.append(f"[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2[vcrop]")
         last_v_pad = "[vcrop]"
         
+    elif template_type == "pro_vlog":
+        # Usually no cropping unless requested, but we add subtitles
+        pass 
+        
+    else:
+        # 'raw' template logic (the original behavior)
+        if crop_916:
+            video_filters.append(f"{last_v_pad}crop='ih*9/16':'ih'[vcrop]")
+            last_v_pad = "[vcrop]"
+            
+    # Subtitles logic
+    if subtitle_ass_path and os.path.exists(subtitle_ass_path):
+        # Escape path for FFmpeg filter
+        safe_ass = subtitle_ass_path.replace("\\", "/").replace(":", "\\:")
+        video_filters.append(f"{last_v_pad}ass='{safe_ass}'[vsub]")
+        last_v_pad = "[vsub]"
+        
+    # Text Overlay logic
     if drawtext_text:
-        # Thai font support needs a proper font file. If not provided, fallback to default.
-        font_opt = f":fontfile={font_file}" if font_file and os.path.exists(font_file) else ""
         text_safe = drawtext_text.replace("'", r"\'").replace(":", r"\:")
         video_filters.append(
             f"{last_v_pad}drawtext=text='{text_safe}':fontcolor={font_color}:fontsize={font_size}{font_opt}:x=(w-text_w)/2:y=(h-text_h)/2[vtext]"
@@ -61,7 +85,7 @@ def process_video(
         filter_complex.append(";".join(video_filters))
         final_v_pad = last_v_pad
     else:
-        final_v_pad = "0:v" # No video filters, just use original
+        final_v_pad = "0:v"
 
     # --- Audio Filters ---
     audio_filters = []
@@ -70,7 +94,7 @@ def process_video(
     
     if mute_original_audio and bgm_input_index == -1:
         # Just mute, no other audio
-        pass # We will use -an or not map audio
+        pass 
     elif mute_original_audio and bgm_input_index != -1:
         # Only BGM
         audio_filters.append(f"[{bgm_input_index}:a]volume={bgm_volume}[a_bgm]")

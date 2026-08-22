@@ -533,6 +533,84 @@ async def api_generate_tts(
 
     return FileResponse(path=raw_output_path, media_type="audio/wav", filename=f"tts_raw.wav")
 
+
+@app.post("/api/video/templates/quote169", tags=["Video Templates"])
+async def api_template_quote169(
+    video_path: str = Form(...),
+    text_lines: str = Form(...),
+    audio_path: str = Form(None),
+    font_size: int = Form(60),
+    font_color: str = Form("white")
+):
+    """Template: Smart Background Blur to 16:9 + Center Text + Audio Replacement"""
+    try:
+        import os
+        from ffmpeg_processor import process_video
+        
+        if not os.path.exists(video_path):
+            raise HTTPException(status_code=400, detail=f"Input video not found: {video_path}")
+            
+        output = f"{video_path}_quote169.mp4"
+        
+        result = await asyncio.to_thread(
+            process_video,
+            input_video=video_path,
+            output_video=output,
+            mute_original_audio=True, # Quote template usually replaces audio
+            bgm_file=audio_path,
+            bgm_volume=1.0,
+            drawtext_text=text_lines,
+            font_size=font_size,
+            font_color=font_color,
+            template_type="quote_169"
+        )
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("error"))
+        return {"status": "success", "output_path": output, "command_used": result.get("cmd")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/video/templates/pro_vlog", tags=["Video Templates"])
+async def api_template_pro_vlog(
+    video_path: str = Form(...),
+    audio_path: str = Form(None),
+    subtitle_style: str = Form("tiktok_yellow"),
+    enhance_audio: bool = Form(True)
+):
+    """Template: Dynamic Subtitles (Karaoke) + Audio Mastering"""
+    try:
+        import os
+        from subtitle_engine import generate_ass_subtitle
+        from ffmpeg_processor import process_video
+        
+        if not os.path.exists(video_path):
+            raise HTTPException(status_code=400, detail=f"Input video not found: {video_path}")
+            
+        target_audio = audio_path if audio_path else video_path
+        
+        ass_out = f"{video_path}.ass"
+        await asyncio.to_thread(generate_ass_subtitle, target_audio, ass_out, subtitle_style)
+        
+        output = f"{video_path}_provlog.mp4"
+        mute_orig = True if audio_path else False
+        
+        result = await asyncio.to_thread(
+            process_video,
+            input_video=video_path,
+            output_video=output,
+            mute_original_audio=mute_orig,
+            bgm_file=audio_path,
+            bgm_volume=1.0,
+            template_type="pro_vlog",
+            subtitle_ass_path=ass_out
+        )
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("error"))
+        return {"status": "success", "output_path": output, "subtitle_path": ass_out, "command_used": result.get("cmd")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/video/edit", tags=["Video"])
 async def api_video_edit(
     video_path: str = Form(...),
