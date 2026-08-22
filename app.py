@@ -534,15 +534,15 @@ async def api_generate_tts(
     return FileResponse(path=raw_output_path, media_type="audio/wav", filename=f"tts_raw.wav")
 
 
-@app.post("/api/video/templates/quote169", tags=["Video Templates"])
-async def api_template_quote169(
+@app.post("/api/video/templates/quote916", tags=["Video Templates"])
+async def api_template_quote916(
     video_path: str = Form(...),
     text_lines: str = Form(...),
     audio_path: str = Form(None),
     font_size: int = Form(60),
     font_color: str = Form("white")
 ):
-    """Template: Smart Background Blur to 16:9 + Center Text + Audio Replacement"""
+    """Template: Smart Background Blur to 9:16 + Center Text + Audio Replacement"""
     try:
         import os
         from ffmpeg_processor import process_video
@@ -550,7 +550,7 @@ async def api_template_quote169(
         if not os.path.exists(video_path):
             raise HTTPException(status_code=400, detail=f"Input video not found: {video_path}")
             
-        output = f"{video_path}_quote169.mp4"
+        output = f"{video_path}_quote916.mp4"
         
         result = await asyncio.to_thread(
             process_video,
@@ -562,7 +562,8 @@ async def api_template_quote169(
             drawtext_text=text_lines,
             font_size=font_size,
             font_color=font_color,
-            template_type="quote_169"
+            template_type="quote_916",
+            font_file=os.path.join(BASE_DIR, 'assets', 'fonts', 'Sarabun-Bold.ttf')
         )
         if result.get("status") == "error":
             raise HTTPException(status_code=500, detail=result.get("error"))
